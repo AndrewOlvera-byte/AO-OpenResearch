@@ -1,0 +1,90 @@
+# Tuned from-scratch PPO with win-focused reward annealing and eval-on-win-rate.
+# Fully self-contained (common.yaml is stubs only).
+#
+# Tuning rationale (from the 654M-step baseline run + 0% win-rate eval):
+#   - The baseline farmed dense shaping (eval reward peaked ~164M then plateaued)
+#     but never learned to WIN. So:
+#   - gamma 0.99 -> 0.999: games run ~2000 steps; gamma 0.99 has a ~100-step
+#     effective horizon, too short for the terminal win reward to propagate back.
+#   - ent_coef 0.01 -> 0.005: baseline entropy sat near 100% of max (policy stayed
+#     ~random); lower it so the policy commits to coherent play.
+#   - reward anneals dense_shaped -> win_focused over ~120M steps: bootstrap on
+#     dense signal, then optimize the true win objective.
+#   - longer bot phase (40M) to master the scripted bots before self-play.
+#   - eval selects best checkpoint by win rate (unhackable), 10 games/bot.
+
+run:
+  name: base_rlFS_expert_fixed_rewards
+  seed: 0
+  device: auto
+
+model:
+  type: cnn_mlp
+  neck_hidden: [256]
+  neck_out: 256
+  critic_hidden: [256]
+  encoder:
+    stem_channels: 32
+    layers: [2, 2, 2, 2]
+    stage_planes: [32, 64, 128, 256]
+    stem_type: classic
+
+data: {}
+
+training:
+  iters: 20000
+  ppo:
+    lr: 2.5e-4
+    epochs: 4
+    minibatches: 4
+    clip: 0.2
+    vf_coef: 0.5
+    ent_coef: 0.005          # tuned down: baseline stayed near-random
+    max_grad_norm: 0.5
+    clip_vloss: true
+    gamma: 0.999             # tuned up: propagate the sparse terminal win reward
+    lam: 0.95
+    target_kl: 0.03
+  collector:
+    horizon: 128
+    overlap: true
+    normalize_reward: true
+    reward_clip: 10.0
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 10                # more games -> lower-variance win-rate estimate
+    envs_per_bot: 4
+    max_steps: 2000
+    greedy: true
+  checkpoint:
+    every_iters: 50
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+  guards:
+    entropy_floor_frac: 0.05
+    entropy_patience: 30
+    fatal: false
+  curriculum:
+    type: ppo
+    bot_steps: 40000000       # master the bots before self-play
+    freeze_steps: 1000000
+    bots: [randomBiasedAI, workerRushAI, lightRushAI, coacAI]
+    eval_bots: [randomBiasedAI, workerRushAI, coacAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    num_envs: 256
+    reward_preset: dense_shaped
+    reward_start_preset: dense_shaped
+    reward_end_preset: win_focused
+    reward_anneal_steps: 120000000   # dense -> win-focused over ~18% of the run
+    snapshot_every: 500000
+    pool_capacity: 8
+    recency_bias: 2.0
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, ppo, resnet-mlp, from-scratch, curriculum, selfplay, fixed-rewards, win-focused, tuned, v2]

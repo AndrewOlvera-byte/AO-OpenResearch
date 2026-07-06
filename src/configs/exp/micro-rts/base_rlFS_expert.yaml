@@ -1,0 +1,80 @@
+# From-scratch PPO: ResNet-MLP policy vs scripted experts, then snapshot self-play,
+# with an early encoder-freeze. Fully self-contained (common.yaml is stubs only).
+# This is the ORIGINAL baseline config (dense-leaning reward). See
+# base_rlFS_expert_fixed_rewards.yaml for the tuned, win-focused run.
+
+run:
+  name: base_rlFS_expert
+  seed: 0
+  device: auto
+
+model:
+  type: cnn_mlp
+  neck_hidden: [256]
+  neck_out: 256
+  critic_hidden: [256]
+  encoder:
+    stem_channels: 32
+    layers: [2, 2, 2, 2]
+    stage_planes: [32, 64, 128, 256]
+    stem_type: classic
+
+data: {}
+
+training:
+  iters: 20000
+  ppo:
+    lr: 2.5e-4
+    epochs: 4
+    minibatches: 4
+    clip: 0.2
+    vf_coef: 0.5
+    ent_coef: 0.01
+    max_grad_norm: 0.5
+    clip_vloss: true
+    gamma: 0.99
+    lam: 0.95
+    target_kl: 0.03
+  collector:
+    horizon: 128
+    overlap: true
+    normalize_reward: true
+    reward_clip: 10.0
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 5
+    envs_per_bot: 4
+    max_steps: 2000
+    greedy: true
+  checkpoint:
+    every_iters: 50
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+  guards:
+    entropy_floor_frac: 0.05
+    entropy_patience: 30
+    fatal: false
+  curriculum:
+    type: ppo
+    bot_steps: 8000000
+    freeze_steps: 1000000
+    bots: [randomBiasedAI, workerRushAI, lightRushAI, coacAI]
+    eval_bots: [randomBiasedAI, workerRushAI, coacAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    num_envs: 256
+    reward_preset: dense_shaped
+    reward_start_preset: dense_shaped
+    reward_end_preset: win_focused
+    reward_anneal_steps: 20000000
+    snapshot_every: 500000
+    pool_capacity: 8
+    recency_bias: 2.0
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, ppo, resnet-mlp, from-scratch, curriculum, selfplay, expert-bots, v1]

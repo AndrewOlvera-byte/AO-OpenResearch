@@ -1,0 +1,18 @@
+# Base stubs only. Every experiment under configs/exp/ is fully self-contained and
+# defines its own model/training/curriculum/eval; this file just guarantees the
+# five top-level sections exist and carries a couple of universal defaults.
+
+run:
+  seed: 0
+  device: auto            # auto -> cuda if available else cpu
+  ckpt_dir: checkpoints
+
+model: {}
+
+data: {}
+
+training: {}
+
+wandb:
+  project: micro-rts
+  entity: andrewolvera

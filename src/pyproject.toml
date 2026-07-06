@@ -1,0 +1,23 @@
+# Placeholder for the micro-rts subpackage.
+#
+# The repo currently builds/installs from the root pyproject.toml (deps-only,
+# editable). As the micro-rts code under src/micro-rts/ matures into an
+# importable package it will get its own build config here.
+#
+# Note: the directory name "micro-rts" contains a hyphen and is therefore not a
+# valid Python import name — rename to `microrts` (or add a package mapping)
+# before turning this into a real installable distribution.
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "micro-rts"
+version = "0.0.1"
+description = "MicroRTS RL research package (work in progress)."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools]
+packages = []

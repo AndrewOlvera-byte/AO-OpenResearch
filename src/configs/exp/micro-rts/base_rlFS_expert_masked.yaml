@@ -1,0 +1,106 @@
+# From-scratch PPO — canonical GridNet with INVALID ACTION MASKING.
+#
+# This is the best-practice setup for full-game MicroRTS (Huang et al. 2021,
+# "Gym-uRTS"): masked PPO + a GridNet encoder-decoder that commands EVERY unit each
+# step. It is the configuration that lets masked PPO beat the scripted competition
+# bots — the earlier single-unit-per-step head is limited to one action per frame.
+#
+# History (see docs / memory microrts-missing-action-masking):
+#   - base_rlFS_expert.yaml (dense) + base_rlFS_expert_fixed_rewards.yaml (annealed to
+#     sparse) both failed identically: NO invalid-action masking, so the policy sampled
+#     ~all no-ops, entropy pinned near max, it never learned to win. Reward was not the
+#     root cause.
+#   - Fix: engine masks are surfaced from the JVM client (getMasks); the GridNet head
+#     masks source + per-cell component logits; empty/busy cells collapse to NOOP with
+#     zero gradient. gym_microrts is NOT bumped — 0.3.2 already commands all units per
+#     step via the (N, H*W, 8) action format and exposes per-cell masks.
+#
+# Key choices (best practice):
+#   - reward stays dense_shaped for the WHOLE run (no anneal to sparse) — dense_shaped
+#     is the canonical Gym-uRTS vector and its win term (weight 10) is the objective.
+#   - gamma 0.99 (dense reward -> short effective horizon is fine).
+#   - freeze_steps 0: train the encoder end-to-end from scratch (freezing a randomly
+#     initialized encoder starves the heads; freezing is a fine-tuning tool, not a
+#     from-scratch one).
+#   - eval selects the best checkpoint by win rate (unhackable).
+
+run:
+  name: base_rlFS_expert_masked
+  seed: 0
+  device: auto
+
+model:
+  type: cnn_gridnet
+  channels: 64
+  critic_hidden: [256]
+
+data: {}
+
+training:
+  iters: 20000
+  ppo:
+    # Batch math: batch = horizon*num_envs = 256*256 = 65,536 transitions/iter;
+    # minibatches=8 -> 8,192 samples/minibatch (evenly divides the batch). Advantages
+    # are normalized per-minibatch, so 8,192 gives low-variance stats. A large minibatch
+    # lowers gradient variance, so lr 2.5e-4 stays safe; anneal it linearly to 0.
+    lr: 2.5e-4
+    anneal_lr: true          # canonical PPO LR schedule; stabilizes late training
+    amp: true                # bf16 autocast on the update (~1.5-1.8x on Blackwell; also
+                             # lowers activation VRAM). bf16 needs no GradScaler.
+    epochs: 2                # halves update compute vs 4; PPO tolerates 2 epochs well
+    minibatches: 8           # 8,192/minibatch. Measured peak ~11GB/16GB on a 5070 Ti;
+                             # minibatches=4 (16,384) OOMs at ~18GB, so 8 is the max safe.
+    clip: 0.2
+    vf_coef: 0.5
+    ent_coef: 0.01
+    max_grad_norm: 0.5
+    clip_vloss: true
+    gamma: 0.99
+    lam: 0.95
+    target_kl: 0.03
+  collector:
+    horizon: 256             # bumped from 128: 65,536 transitions/iter (more data/update)
+    overlap: true
+    normalize_reward: true
+    reward_clip: 10.0
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 10
+    envs_per_bot: 4
+    max_steps: 2000
+    greedy: true
+  checkpoint:
+    every_iters: 50
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+  guards:
+    # GridNet entropy sums over active cells vs the unmasked per-cell max, so the
+    # entropy-fraction metric is not on a [0,1] scale — keep the floor low, non-fatal.
+    entropy_floor_frac: 0.01
+    entropy_patience: 50
+    fatal: false
+  curriculum:
+    type: ppo
+    gridnet: true             # command all units per step (canonical GridNet)
+    bot_steps: 120000000      # long bot phase: master the scripted experts first
+    freeze_steps: 0           # from-scratch: train end-to-end, no encoder freeze
+    bots: [randomBiasedAI, workerRushAI, lightRushAI, coacAI]
+    eval_bots: [randomBiasedAI, workerRushAI, coacAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    num_envs: 256
+    reward_preset: dense_shaped
+    reward_start_preset: dense_shaped
+    reward_end_preset: dense_shaped   # NO anneal to sparse — keep the shaped signal
+    reward_anneal_steps: 1
+    snapshot_every: 500000
+    pool_capacity: 8
+    recency_bias: 2.0
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, ppo, gridnet, from-scratch, curriculum, selfplay, masked, invalid-action-masking, v3]

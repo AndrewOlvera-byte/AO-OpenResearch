@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ao-openresearch"
+version = "0.0.1"
+description = "AO OpenResearch monorepo — RL research, starting with gym-microrts."
+requires-python = ">=3.9"
+dependencies = [
+    # gym-microrts drives a Java MicroRTS engine via JPype.
+    # 0.6.0 needs Python <3.10; 0.3.2 is the last release tested here on 3.11.
+    "gym_microrts==0.3.2",
+    "JPype1>=1.4",
+    "gym==0.21.0",
+    # gym_microrts 0.3.2 still uses the removed np.int alias, so numpy must
+    # predate 1.24. 1.23.5 is the last 1.23.x release.
+    "numpy==1.23.5",
+    # tensordict is the data-plane for rollout/collection plumbing.
+    "tensordict>=0.13",
+    "pytest>=7",
+    # Each test that builds a MicroRTS env needs its own process (one JVM per
+    # process, no restart); --forked gives every test a clean fork.
+    "pytest-forked",
+    # Experiment tracking (PPO trainer logs metrics/eval to W&B).
+    "wandb>=0.16",
+]
+
+# This root distribution is deps-only for now; the actual code lives in the
+# src/ subpackages which are built/installed individually as they mature.
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["src/micro-rts/tests"]
+# pythonpath puts the (hyphenated, non-importable-by-name) package dir on sys.path
+# so tests can `import environments.*`, `collectors.*`, `models.*`. `src` is added
+# so the shared `core.*` (registry/config) is importable by models/trainers.
+pythonpath = ["src/micro-rts", "src"]
+# --forked: one process per test so each MicroRTS env gets its own JVM (one JVM
+# per process, no restart). The multiprocess-pool tests also work under fork —
+# their workers spawn cleanly from the forked test process. (Use the --forked
+# flag here, not `pytest.mark.forked`, which hangs on JVM teardown.)
+addopts = "-q --forked"

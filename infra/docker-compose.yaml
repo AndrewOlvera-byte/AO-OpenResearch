@@ -1,0 +1,33 @@
+services:
+  research:
+    build:
+      context: ..            # repo root, so the whole monorepo is the build context
+      dockerfile: infra/Dockerfile
+    image: ao-openresearch:latest
+    container_name: ao-research
+
+    # GPU access for RTX 5070 Ti (Blackwell / sm_120)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+
+    # Shared memory for PyTorch DataLoader workers (default 64MB is too small)
+    shm_size: "16gb"
+
+    # Mount the repo for live code changes
+    volumes:
+      - ..:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+
+    stdin_open: true
+    tty: true
+    command: tail -f /dev/null
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
