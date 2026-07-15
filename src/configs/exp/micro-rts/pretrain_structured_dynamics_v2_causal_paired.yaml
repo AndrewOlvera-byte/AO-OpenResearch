@@ -1,0 +1,80 @@
+run:
+  name: pretrain_structured_dynamics_v2_causal_paired
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    # This baseline trains the exact one-step tau=0,d=1 query. Flow bootstrap
+    # and the shortcut head are intentionally absent until causality passes.
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: causal_paired
+  amp: true
+  # Keep the Dreamer-4 run's optimization budget for a controlled comparison.
+  steps: 60000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 10.0
+
+  # Factual and counterfactual direct prediction are normalized separately, so
+  # the corpus's ~15% branch rate does not dilute the intervention objective.
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 2.0
+  active_token_boost: 1.0
+  changed_token_boost: 8.0
+  change_threshold: 1.0e-5
+
+  val_frac: 0.05
+  eval_every: 1000
+  # More fixed batches make the paired geometry stable despite sparse branches.
+  eval_batches: 16
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 1
+  probe_samples: 64
+  save_every: 5000
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  log_every: 100
+  average_train_metrics: true
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  out: checkpoints/structured_dynamics_v2_causal_paired.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/wm/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_causal_paired
+  tags: [micro-rts, structured-v2, causal-paired, one-step]

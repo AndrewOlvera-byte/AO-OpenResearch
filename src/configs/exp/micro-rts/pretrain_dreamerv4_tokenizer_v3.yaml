@@ -1,0 +1,88 @@
+# DreamerV4 Phase-1 TOKENIZER pretraining, v3 — for the joint-action diverse corpus.
+#
+# The v3 corpus (NEXT_PLAN.md, Workstream C) is deliberately much more diverse
+# than v2: ε-noised strong play, weak/mid checkpoints, self-play blocks, pure
+# random traces, and role-swapped seats. The v2 tokenizer never saw most of that
+# state distribution, so it is retrained on the same arch (recon was never the
+# problem — 0.001 MSE, 0.999 mask acc) to keep coverage. The `model.tokenizer`
+# block MUST stay byte-for-byte identical to pretrain_dreamerv4_dynamics_v3.yaml
+# (frozen-weight load contract), and the latent_scale this run measures is what
+# the dynamics phase inherits.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
+#       --exp micro-rts/pretrain_dreamerv4_tokenizer_v3
+
+run:
+  name: pretrain_dreamerv4_tokenizer_v3
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 3.0e-4          # tokenizer-only Adam LR
+  actor_lr: 3.0e-5          # unused this phase
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_dynamics_v3.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # built but never stepped here; sized to match v3 dynamics
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.15
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: false
+    world_model: true
+    actor: true
+    critic: true
+
+data:
+  # v3 store only (format_version 3: opponent_action + provenance). The loaders
+  # hard-error on older stores, so a stale glob fails loudly, not silently.
+  path: /data/micro-rts/tokdyn_pretrain_v3__*.h5
+
+training:
+  steps: 25000
+  batch: 64
+  seq_len: 16
+  num_workers: 8
+  recon_coef: 1.0
+  mask_coef: 1.0
+  latent_noise: 0.1         # decoder robustness + latent-scale anchor (v2 win)
+  warmup_steps: 500
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 2000
+  eval_batches: 8
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_tokenizer_v3.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, tokenizer, phase1, v3, joint-action-corpus]

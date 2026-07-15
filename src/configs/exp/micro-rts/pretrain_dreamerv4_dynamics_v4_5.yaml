@@ -1,0 +1,91 @@
+# Dynamics v4.5: same checkpoint-compatible architecture as v4.4, retrained on
+# the diverse v3.1 joint-action corpus.  The lower opponent-BC coefficient keeps
+# the auxiliary head from competing with flow/reward capacity.
+run:
+  name: pretrain_dreamerv4_dynamics_v4_5
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.05
+    mask_junk_actions: true
+    action_inject: add
+    opp_head: true
+    opp_head_channels: 64
+    cell_occ_boost: 4.0
+    cell_changed_boost: 16.0
+    cell_weight_floor: 1.0
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true
+    world_model: false
+    actor: true
+    critic: true
+
+data:
+  path: /data/micro-rts/tokdyn_pretrain_v3_1__*.h5
+
+training:
+  amp: true
+  steps: 60000
+  batch: 32
+  seq_len: 16
+  num_workers: 8
+  reward_coef: 1.0
+  cont_coef: 1.0
+  flow_coef: 1.0
+  opp_bc_coef: 0.3
+  flow_self_frac: 0.25
+  flow_self_frac_final: 0.5
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 24
+  rollout_context: 8
+  rollout_samples: 4
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_dynamics_v4_5.pt
+  tokenizer_ckpt: checkpoints/dreamer_tokenizer_v4.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, dynamics, phase2, frozen-tokenizer,
+         v4.5, v3.1-corpus, opp-policy-head, opp-bc-0.3, action-inject-add,
+         junk-action-mask, cell-weighted-loss, tokenizer-v4]

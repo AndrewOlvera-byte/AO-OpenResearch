@@ -18,12 +18,18 @@ dependencies = [
     "numpy==1.23.5",
     # tensordict is the data-plane for rollout/collection plumbing.
     "tensordict>=0.13",
+    # HDF5 store for offline bot rollouts (tokenizer/dynamics pretraining data).
+    # <3.12 keeps compatibility with the numpy 1.23.5 pin above.
+    "h5py>=3.8,<3.12",
     "pytest>=7",
     # Each test that builds a MicroRTS env needs its own process (one JVM per
     # process, no restart); --forked gives every test a clean fork.
     "pytest-forked",
     # Experiment tracking (PPO trainer logs metrics/eval to W&B).
     "wandb>=0.16",
+    # Atari (ALE) for the DreamerV4 eval env. 0.10.x bundles ROMs and works with the
+    # numpy 1.23.5 pin above (no gym/gymnasium dependency; we drive ALEInterface directly).
+    "ale-py==0.10.2",
 ]
 
 # This root distribution is deps-only for now; the actual code lives in the

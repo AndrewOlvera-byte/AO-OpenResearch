@@ -1,0 +1,98 @@
+# HARD LEAGUE — warm-start from the league agent, push against the strong bots.
+#
+# The prior run (base_rlFS_expert_masked_league) broke the coacAI wall: it now sweeps
+# the easy/medium bot set (routinely 100% incl. coacAI), i.e. it has SATURATED its
+# opponents. Win-rate over that set no longer discriminates, and self-play alone won't
+# reliably expose it to the strongest scripted styles. So we warm-start its best
+# checkpoint into a harder league: a rotation of the strong CoG competition bots plus
+# self-play, and an eval set that includes a search bot (naiveMCTSAI) as the ceiling.
+#
+# Opponent design (see gym_microrts.microrts_ai):
+#   - TRAIN vs the strong *rule-based* competition bots (coacAI, guidedRojoA3N, tiamat,
+#     droplet, izanagi, mixedBot) — all fast, so throughput stays high — weighted with a
+#     little lightRush/workerRush to keep early-rush defense sharp (anti-forgetting).
+#   - Do NOT train vs naiveMCTSAI: it is search-based and would tank the 256-env sps.
+#   - EVAL vs a hard subset INCLUDING naiveMCTSAI, so the metric keeps discriminating
+#     past the scripted-rule ceiling. Eval is infrequent, so the MCTS cost is tolerable.
+
+run:
+  name: base_rlFS_expert_masked_league_hard
+  seed: 0
+  device: auto
+  # Warm-start weights from the league run's best checkpoint (first clean 100% sweep).
+  init_from: checkpoints/base_rlFS_expert_masked_league/best.pt
+
+model:
+  type: cnn_gridnet
+  channels: 64
+  critic_hidden: [256]
+
+data: {}
+
+training:
+  iters: 8000
+  ppo:
+    lr: 1.0e-4               # gentle warm-start LR; the policy is already strong
+    anneal_lr: true
+    amp: true
+    epochs: 2
+    minibatches: 8
+    clip: 0.2
+    vf_coef: 0.5
+    ent_coef: 0.01
+    max_grad_norm: 0.5
+    clip_vloss: true
+    gamma: 0.99
+    lam: 0.95
+    target_kl: 0.03
+  collector:
+    horizon: 256
+    overlap: true
+    normalize_reward: true
+    reward_clip: 10.0
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 100         # less often: eval now includes the slow MCTS bot
+    games: 8
+    envs_per_bot: 3          # small eval footprint (VRAM-friendly): 3 * 6 bots = 18 envs
+    max_steps: 2000
+    greedy: true
+  checkpoint:
+    every_iters: 50
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+  guards:
+    entropy_floor_frac: 0.01
+    entropy_patience: 50
+    fatal: false
+  curriculum:
+    type: ppo
+    gridnet: true
+    # Short pure-bot warmup so the warm-started policy adapts to the harder rotation
+    # before self-play resumes.
+    bot_steps: 20000000
+    freeze_steps: 0
+    # Strong fast rule-based competition bots (weighted) + a little rush defense.
+    bots: [coacAI, guidedRojoA3N, tiamat, droplet, izanagi, mixedBot, lightRushAI, workerRushAI]
+    # Hard eval set, incl. the search bot as the ceiling gauge.
+    eval_bots: [coacAI, guidedRojoA3N, tiamat, droplet, izanagi, naiveMCTSAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    num_envs: 256
+    reward_preset: dense_shaped
+    reward_start_preset: dense_shaped
+    reward_end_preset: dense_shaped
+    reward_anneal_steps: 1
+    # After warmup: alternate ~10M steps of (hard) bots with ~6M of self-play.
+    mix_bot_block: 10000000
+    mix_selfplay_block: 6000000
+    snapshot_every: 500000
+    pool_capacity: 8
+    recency_bias: 2.0
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, ppo, gridnet, warm-start, league, hard-bots, curriculum, selfplay, masked, v5]

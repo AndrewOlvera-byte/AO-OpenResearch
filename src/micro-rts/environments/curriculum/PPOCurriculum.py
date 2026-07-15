@@ -43,9 +43,19 @@ class PPOCurriculum(BaseCurriculum):
         pool_capacity: int = 8,
         recency_bias: float = 2.0,
         gridnet: bool = False,
+        mix_bot_block: int = 0,
+        mix_selfplay_block: int = 0,
     ) -> None:
         self.bot_steps = bot_steps
         self.freeze_steps = freeze_steps
+        # Mixed bot+self-play region (after the initial pure-bot warmup of
+        # ``bot_steps``): alternate blocks of ``mix_bot_block`` steps vs scripted bots
+        # and ``mix_selfplay_block`` steps vs past selves. Keeping the bots (esp. the
+        # hardest one) in rotation fights catastrophic forgetting, while self-play
+        # pushes past the scripted skill ceiling. Both blocks > 0 enables mixing; if
+        # either is 0 the schedule is the classic pure-bot-then-pure-self-play.
+        self.mix_bot_block = mix_bot_block
+        self.mix_selfplay_block = mix_selfplay_block
         self.bots = tuple(bots)
         self.eval_bots = tuple(eval_bots)
         self.map_path = map_path
@@ -69,7 +79,13 @@ class PPOCurriculum(BaseCurriculum):
 
     # --- schedule --------------------------------------------------------
     def phase(self, global_step: int) -> str:
-        return "bot" if global_step < self.bot_steps else "selfplay"
+        if global_step < self.bot_steps:
+            return "bot"
+        if self.mix_bot_block > 0 and self.mix_selfplay_block > 0:
+            cycle = self.mix_bot_block + self.mix_selfplay_block
+            pos = (global_step - self.bot_steps) % cycle
+            return "bot" if pos < self.mix_bot_block else "selfplay"
+        return "selfplay"
 
     def _encoder_frozen(self, global_step: int) -> bool:
         return global_step < self.freeze_steps

@@ -1,0 +1,128 @@
+# DreamerV4 Phase-2 DYNAMICS pretraining, v4.1 — cell-weighted flow on the v4
+# TOKENIZER's latents, with harder weighting and a de-noised probe.
+#
+# Why v4.1 (verdict on the v4 run, wandb e0xi8hhh, stopped ~12k/60k): cell
+# weighting alone moved CF-PROBE self_gap from v3's zero-centered coin flip to
+# mostly-positive (8/12 evals, mean ~+0.002, peaking ~0.01 at 7-8k) — but it
+# oscillated instead of growing, a borderline miss of the ">0 and growing by
+# 10k" gate. Two compounding issues, both addressed here:
+#   * The probe itself was too noisy to read (8 val sequences; measurement
+#     swing +-0.005 ~= the signal) -> eval_batches 24, batch 32.
+#   * The step-1 action effect has an intrinsic ceiling in MicroRTS (in-flight
+#     unit actions are visible in the obs action planes; only newly-ISSUED
+#     actions add information), so the gradient nudge needs to be stronger and
+#     the latents sharper where actions land.
+# v4.1 therefore attacks the SNR from both sides at once:
+#   1. LATENTS — consumes checkpoints/dreamer_tokenizer_v4.pt (group-CE +
+#      cell-weighted recon; gate: changed-cell latent delta >= v3's 0.62 RMS,
+#      occupied-cell acc >= v3). Train that FIRST:
+#        python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
+#            --exp micro-rts/pretrain_dreamerv4_tokenizer_v4
+#   2. LOSS — changed_boost 16 -> 48 and floor 1.0 -> 0.5: changed cells go
+#      from ~2/3 to ~90% of the flow-gradient mass (16x was conservative).
+#   3. MEASUREMENT — batch 32 (bf16 leaves plenty of VRAM headroom; halves
+#      gradient AND probe variance), eval_batches 24 so the 10k verdict is
+#      readable.
+#
+# The `model.tokenizer` block MUST match pretrain_dreamerv4_tokenizer_v4.yaml
+# (it does — arch is unchanged across v3/v4 tokenizers; only the objective
+# differs, which lives in that file's training: block).
+#
+#   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
+#       --exp micro-rts/pretrain_dreamerv4_dynamics_v4_1
+#
+# GATE (pre-registered, same as v4): CF-PROBE self_gap/opp_gap > 0 and GROWING
+# by ~10k steps, else stop the run. If v4.1 also plateaus, the next escalation
+# is the inverse-dynamics auxiliary head (predict a_t from z_t, z_{t+1}) — no
+# longer optional at that point. Full reasoning:
+# docs/micro-rts/DREAMERV4_V4_DESIGN.md.
+
+run:
+  name: pretrain_dreamerv4_dynamics_v4_1
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5          # unused this phase
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_tokenizer_v4.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # transformer unchanged since v3; only the loss weights move
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.15       # marginal/conditional in one model; fog-of-war hook
+    # v4.1: harder cell weighting (v4 ran occ 4 / changed 16 / floor 1.0 and
+    # the probe went positive-but-flat). floor 0.5 demotes the static
+    # background; changed 48x makes newly-moved cells dominate the gradient.
+    cell_occ_boost: 4.0
+    cell_changed_boost: 48.0
+    cell_weight_floor: 0.5
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true
+    world_model: false
+    actor: true
+    critic: true
+
+data:
+  # Same validated v3 store — still isolating recipe changes, not data.
+  path: /data/micro-rts/tokdyn_pretrain_v3__*.h5
+
+training:
+  amp: true                 # bf16 autocast -> SDPA takes the flash-attention kernel
+  steps: 60000
+  batch: 32                 # v4 ran 16 at 6.2GB VRAM; 32 halves grad/probe variance
+  seq_len: 16
+  num_workers: 8
+  reward_coef: 1.0
+  cont_coef: 1.0
+  flow_coef: 1.0
+  flow_self_frac: 0.25          # linear ramp start ...
+  flow_self_frac_final: 0.5     # ... to here by the last step (distillation budget)
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 24          # v4's 8 made the CF probe unreadable (noise ~= signal)
+  rollout_context: 8
+  rollout_samples: 4        # best-of-N open-loop samples (residual stochasticity)
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_dynamics_v4_1.pt
+  tokenizer_ckpt: checkpoints/dreamer_tokenizer_v4.pt   # <- train tokenizer_v4 first
+  # For the tokenizer-held-fixed ablation instead (isolates the boost/batch
+  # changes from the new latents), override at launch:
+  #   --tokenizer-ckpt checkpoints/dreamer_tokenizer_v3.pt \
+  #   --set training.out=checkpoints/dreamer_dynamics_v4_1_tok3.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, dynamics, phase2, frozen-tokenizer, v4.1, cell-weighted-loss, tokenizer-v4]

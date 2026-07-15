@@ -22,6 +22,9 @@ services:
     volumes:
       - ..:/workspace
       - ~/.cache/huggingface:/root/.cache/huggingface
+      # Persist collected datasets to the repo's data/ dir while exposing the
+      # canonical /data/micro-rts path inside the container (collect_mrts_data.py).
+      - ../data:/data
 
     stdin_open: true
     tty: true

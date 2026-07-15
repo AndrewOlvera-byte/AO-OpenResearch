@@ -54,6 +54,8 @@ def build_trainer(args) -> PPOTrainer:
         trainer.device = resolve_device(args.device)
     if args.no_wandb:
         trainer.use_wandb = False
+    if args.wandb_key:
+        trainer._wandb_key = args.wandb_key
     if args.resume or args.resume_from:
         # Resume from a full checkpoint (model + optimizer + step) under the run dir.
         # --resume picks "latest"; --resume-from names a tag (e.g. best, step_65536000).
@@ -66,6 +68,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/base_rlFS_expert")
     parser.add_argument("--test", action="store_true", help="single-batch smoke test (no W&B / no save)")
     parser.add_argument("--no-wandb", action="store_true", help="disable remote W&B logging")
+    parser.add_argument("--wandb-key", default=None, metavar="KEY",
+                        help="W&B API key (else uses WANDB_API_KEY env / saved ~/.netrc; "
+                             "prompts if none). A provided key is saved in the container.")
     parser.add_argument("--device", default=None, help="override device (cpu/cuda/auto)")
     parser.add_argument("--resume", action="store_true",
                         help="resume from the run's latest.pt (model + optimizer + step)")

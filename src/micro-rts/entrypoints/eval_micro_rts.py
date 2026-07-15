@@ -83,13 +83,13 @@ def load_policy(cfg: Config, ckpt_path: Path, env, device) -> torch.nn.Module:
 
 # --- match play ----------------------------------------------------------
 def play_matches(policy, bots, games, max_steps, device, envs_per_bot=8,
-                 deterministic=True, seed=0):
+                 deterministic=True, seed=0, gridnet=False):
     """Build a bot env, play the matches (shared logic), and close the env."""
     torch.manual_seed(seed)
     n = envs_per_bot * len(bots)
     env = MicroRTSVecEnv(EnvConfig(
         num_envs=n, mode="bot", bots=tuple(bots), max_steps=max_steps,
-        reward_weight=WIN_LOSS_WEIGHT,
+        reward_weight=WIN_LOSS_WEIGHT, gridnet=gridnet,
     ))
     env_bots = [bots[i % len(bots)] for i in range(n)]
     try:
@@ -132,12 +132,14 @@ def main(argv=None):
     device = resolve_device(args.device or cfg.run.get("device", "auto"))
     ckpt_path = resolve_checkpoint(cfg, args.checkpoint)
 
-    bots = args.bots or list(cfg.training["curriculum"].get("eval_bots", ["coacAI"]))
+    curriculum = cfg.training["curriculum"]
+    bots = args.bots or list(curriculum.get("eval_bots", ["coacAI"]))
+    gridnet = bool(curriculum.get("gridnet", False))
     run_dir = Path(cfg.run.get("ckpt_dir", "checkpoints")) / cfg.run.get("name", "run")
 
     # Build a throwaway env just to size the policy, then load weights.
     sizing_env = MicroRTSVecEnv(EnvConfig(num_envs=len(bots), mode="bot", bots=tuple(bots),
-                                          reward_weight=WIN_LOSS_WEIGHT))
+                                          reward_weight=WIN_LOSS_WEIGHT, gridnet=gridnet))
     obs_shape, action_nvec = sizing_env.obs_shape, sizing_env.action_nvec
     policy, step = load_policy(cfg, ckpt_path, sizing_env, device)
 
@@ -146,7 +148,8 @@ def main(argv=None):
           f"mode={'sample' if args.sample else 'greedy'}")
     t0 = time.perf_counter()
     stats = play_matches(policy, bots, args.games, args.max_steps, device,
-                         envs_per_bot=args.envs_per_bot, deterministic=not args.sample)
+                         envs_per_bot=args.envs_per_bot, deterministic=not args.sample,
+                         gridnet=gridnet)
     report = build_report(stats)
     report["meta"] = {
         "exp": args.exp, "checkpoint": str(ckpt_path), "step": step,

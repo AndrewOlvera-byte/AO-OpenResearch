@@ -1,0 +1,113 @@
+# Preserve the pretrained action-to-delta solution and learn only conservative
+# corrections. The first grounded-residual run established that the untouched
+# prior beats copy-last (0.1077 vs 0.1120 latent MSE) with 0.912 changed-cell F1.
+# Its trainable router and weakly constrained correction then co-adapted away
+# from that solution while the composite checkpoint score continued improving.
+run:
+  name: pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: causal_paired
+  amp: true
+  steps: 40000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+
+  # The transferred prior is already useful. Use one tenth of the former peak
+  # LR and never allow the router itself to co-adapt with the correction model.
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  freeze_action_encoder: true
+  freeze_action_router: true
+
+  # Optimize complete-state fidelity rather than sacrificing empty/entity slots
+  # to an 8x sparse-token weighting. The correction trust region makes every
+  # departure from the pretrained prior earn its added magnitude.
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 2.0
+  causal_effect_cosine_coef: 0.05
+  causal_effect_norm_coef: 0.02
+  residual_correction_coef: 0.50
+  active_token_boost: 1.0
+  changed_token_boost: 2.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 1.0
+
+  # Direct grounding caused the old composite score to improve while broad
+  # latent and paired-CF fidelity regressed. Reintroduce it only in a later,
+  # separately gated fine-tune after this model improves on the frozen prior.
+  canonical_grounding_coef: 0.0
+  canonical_changed_boost: 0.0
+
+  paired_batch_fraction: 0.50
+  val_frac: 0.05
+  eval_every: 500
+  eval_batches: 64
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 1
+  probe_samples: 256
+
+  warmup_steps: 500
+  lr_stages:
+    - {end_step: 10000, start_frac: 1.0, end_frac: 0.3}
+    - {end_step: 40000, start_frac: 0.3, end_frac: 0.05}
+  lr_min_frac: 0.05
+  log_every: 100
+  average_train_metrics: true
+
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  action_tokenizer_ckpt: checkpoints/structured_action_tokenizer_v2.pt
+  out: checkpoints/structured_dynamics_v2_causal_paired_action_residual_trust_region.pt
+  checkpoint:
+    every_steps: 2500
+    keep_last: 5
+    # The prior run's composite total selected progressively worse general
+    # prediction. Broad normalized latent fidelity is the primary safety gate.
+    monitor: val/causal/unweighted_mse
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region
+  tags: [micro-rts, structured-v2, causal-paired, deterministic, residual,
+         trust-region, frozen-router, full-padding, pretrained-action]

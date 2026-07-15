@@ -1,0 +1,109 @@
+# WARM-STARTED masked-GridNet PPO — bot+self-play "league" push.
+#
+# Purpose: take the strongest from-scratch masked agent we have and push past its
+# plateau. The prior run (base_rlFS_expert_masked) mastered the weak/medium bots
+# (100% vs randomBiasedAI + workerRushAI) but hit a wall at coacAI (0/30) and
+# plateaued at 66.7% overall before CRASHING at the bot->self-play transition
+# (selfplay_collector could not handle the GridNet (N, H*W, 7) action shape — now
+# fixed). This run continues from that agent's best checkpoint.
+#
+# Two changes vs the prior config:
+#   1. run.init_from: warm-start the policy weights from the previous run's best.pt
+#      (fresh optimizer + step 0 + fresh LR schedule; we stand on the learned policy
+#      rather than restarting from scratch).
+#   2. Mixed opponents: after a short re-stabilization warmup vs bots, ALTERNATE
+#      blocks of bot play and self-play (mix_bot_block / mix_selfplay_block). Keeping
+#      the scripted experts — especially coacAI — in rotation fights catastrophic
+#      forgetting (the reason pure self-play can regress on the bot it never beat),
+#      while self-play pushes past the scripted skill ceiling. The bot lanes are
+#      weighted toward coacAI, the wall.
+#
+# Bug fix baked in: collectors/selfplay_collector.py now allocates the interleaved
+# action tensor with the head's full trailing dims, so the self-play phase no longer
+# crashes for GridNet policies.
+
+run:
+  name: base_rlFS_expert_masked_league
+  seed: 0
+  device: auto
+  # Warm-start weights from the best checkpoint of the prior run (path is relative to
+  # the repo root / process CWD). Weights only — optimizer, step, and best-metric reset.
+  init_from: checkpoints/base_rlFS_expert_masked/best.pt
+
+model:
+  type: cnn_gridnet
+  channels: 64
+  critic_hidden: [256]
+
+data: {}
+
+training:
+  iters: 6000
+  ppo:
+    # Warm-start LR is LOWER than the 2.5e-4 from-scratch value: the policy is already
+    # competent, so a gentler step avoids destroying it before it adapts to the harder
+    # coacAI-weighted bot mix + self-play. Annealed linearly to 0.
+    lr: 1.0e-4
+    anneal_lr: true
+    amp: true
+    epochs: 2
+    minibatches: 8
+    clip: 0.2
+    vf_coef: 0.5
+    ent_coef: 0.01
+    max_grad_norm: 0.5
+    clip_vloss: true
+    gamma: 0.99
+    lam: 0.95
+    target_kl: 0.03
+  collector:
+    horizon: 256
+    overlap: true
+    normalize_reward: true
+    reward_clip: 10.0
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 10
+    envs_per_bot: 4
+    max_steps: 2000
+    greedy: true
+  checkpoint:
+    every_iters: 50
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+  guards:
+    entropy_floor_frac: 0.01
+    entropy_patience: 50
+    fatal: false
+  curriculum:
+    type: ppo
+    gridnet: true
+    # Short pure-bot warmup to re-stabilize the warm-started policy on the new LR and
+    # the coacAI-weighted bot mix before self-play begins.
+    bot_steps: 20000000
+    freeze_steps: 0
+    # Bot mix weighted toward coacAI (the wall): ~50% coacAI, plus lightRush/workerRush
+    # to keep rush-defense sharp. randomBiasedAI is dropped (already 100%, wasted lanes).
+    bots: [coacAI, coacAI, lightRushAI, workerRushAI]
+    eval_bots: [randomBiasedAI, workerRushAI, lightRushAI, coacAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    num_envs: 256
+    reward_preset: dense_shaped
+    reward_start_preset: dense_shaped
+    reward_end_preset: dense_shaped
+    reward_anneal_steps: 1
+    # After warmup: alternate ~10M steps of bots with ~6M steps of self-play (≈62/38).
+    mix_bot_block: 10000000
+    mix_selfplay_block: 6000000
+    snapshot_every: 500000
+    pool_capacity: 8
+    recency_bias: 2.0
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, ppo, gridnet, warm-start, league, curriculum, selfplay, masked, invalid-action-masking, v4]

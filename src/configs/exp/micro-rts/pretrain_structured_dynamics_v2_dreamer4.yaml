@@ -1,0 +1,72 @@
+run:
+  name: pretrain_structured_dynamics_v2_dreamer4
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    # The Dreamer-4 objective samples tau uniformly. No rows are forced to the
+    # pure prior or counted twice; this field remains zero for clear metadata.
+    prior_fraction: 0.0
+    skip_fraction: 0.25
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: dreamer4
+  amp: true
+  steps: 60000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 10.0
+  # Mutually exclusive empirical/bootstrap row fractions. The loss applies the
+  # paper's 0.9*tau+0.1 empirical ramp and (1-tau)^2 bootstrap rescaling.
+  flow_self_frac: 0.25
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 8
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 4
+  probe_samples: 32
+  save_every: 5000
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  log_every: 100
+  # Report interval means instead of one randomly selected batch every 100 steps.
+  average_train_metrics: true
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  out: checkpoints/structured_dynamics_v2_dreamer4.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/wm/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_dreamer4
+  tags: [micro-rts, structured-v2, dreamer4-objective]

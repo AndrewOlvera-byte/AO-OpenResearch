@@ -1,0 +1,168 @@
+# DreamerV4 RL, mode=HYBRID, on the v4.4 pretrained world model — the first
+# checkpoint to clear eval_dreamer_dynamics with 0 FAIL (GO-WITH-CAUTION).
+#
+# What v4.4 brings vs the v2 warm start the original hybrid config used
+# (see checkpoints/dynamics_eval_v4_4 + NOTEBOOK "v4.4 findings"):
+#   - self-action conditioning REAL: issued-cell CF gap +56.9% of true-action
+#     MSE; rollout reward corr collapses to ~0 under shuffled self actions —
+#     the actor's imagined reward is causally coupled to what it does.
+#   - dream opponent: imagination samples the opponent-policy BC head
+#     (type_acc 0.90) each step instead of the unknown_opp marginal, so the
+#     dreamed game contains an acting opponent (MBOM level-0).
+#   - open-loop beats frozen copy-last; cont AUC 0.994; no NaNs.
+#
+# KNOWN SOFT SPOTS (why eval gating below is the contract, not imagined return):
+#   1. Opponent INPUT conditioning is weak (+6.2%) — data identifiability
+#     (opponent ~fully state-inferable in the v3 corpus; BC acc drops only
+#     0.91 -> 0.90 with the opp inputs masked). League drift is therefore only
+#     partially followable by the WM until the v3.1 corpus retrain.
+#   2. Dreams are uniformly rosy: imagined reward 4.37 +/- 0.27 (low variance)
+#     and reward-head corr slipped to 0.83 (opp_bc_coef=1.0 competed for trunk
+#     capacity). A reward surface like this is exploitable — trust ONLY
+#     eval/win_rate (checkpoint.monitor below); imagined return going up while
+#     win_rate stalls = dynamics hacking, stop and retrain (v3.1 +
+#     opp_bc_coef~0.3-0.5).
+#
+# Finetune plumbing notes (DreamerRLTrainer):
+#   - patched-jar bot actions and paired self-play actions are stored in replay;
+#     conditional dynamics and opponent BC therefore continue online.
+#   - every update rehearses v3.1 offline joint-action data to prevent league
+#     drift from erasing the pretrained conditional model.
+#   - imagination receives recorded opponent context; future steps sample the
+#     opponent head (~+25% imagination compute).
+#   - actor/critic remain paused whenever live dynamics fail the health gate.
+#
+# ARCH: the `model:` block MUST match pretrain_dreamerv4_dynamics_v4_4.yaml
+# byte-for-byte (minus lr/clip/freeze) or init_from will refuse to load.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_rl.py \
+#       --exp micro-rts/rl_dreamerv4_hybrid_v4_4
+
+run:
+  name: rl_dreamerv4_hybrid_v4_4
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 3.0e-5          # WM finetune: cooler than pretrain's 1e-4 (which
+                            # cosine-decayed to 1e-5) — protect the pretrained flow
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_tokenizer_v4.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # <<< MUST MATCH pretrain_dreamerv4_dynamics_v4_4.yaml >>>
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.05
+    mask_junk_actions: true # replay actions are raw GridNet output; trainer NOOPs
+                            # non-source cells before every WM consumer
+    action_inject: add
+    opp_head: true          # dream opponent: imagine() samples this head
+    opp_head_channels: 64
+    cell_occ_boost: 4.0
+    cell_changed_boost: 16.0
+    cell_weight_floor: 1.0
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true         # frozen: latent_scale + recon are the pretrain's job
+    world_model: false      # finetunes on fresh replay (marginal pathway)
+    actor: false
+    critic: false
+
+data: {}
+
+training:
+  iters: 5000               # x 2,048 env steps/iter = ~10.2M env steps
+  dreamer:
+    mode: hybrid
+    init_from: checkpoints/dreamer_dynamics_v4_4.pt
+    amp: true               # bf16 autocast: halves activation VRAM + flash attn in bf16
+    buffer_device: cpu      # ring buffer in RAM, not VRAM (obs stored uint8)
+    num_envs: 32
+    horizon: 64             # env steps per collect -> 2,048 fresh transitions/iter
+    seq_len: 16             # replayed sequence length (imagine_context 8 fits inside)
+    batch_seqs: 16          # sequences per update = imagination seeds
+    buffer_capacity: 2048   # ring rows (x num_envs transitions)
+    warmup_steps: 1024
+    train_ratio: 0.5        # -> 4 WM + actor/critic updates per iter
+    imagine_horizon: 15
+    use_flow: true          # shortcut-forcing flow stays on during finetune
+    flow_coef: 1.0
+    flow_self_frac: 0.25
+    # Preserve the foreground-weighted, joint-action v4.4 objective online.
+    opp_bc_coef: 0.3
+    anchor:
+      enabled: true
+      data: /data/micro-rts/tokdyn_pretrain_v3_1__*.h5
+      batch_seqs: 8
+      coef: 0.5
+      num_workers: 2
+    # Pause actor/critic updates when live dreams fail; WM updates keep running.
+    health_gate:
+      enabled: true
+      warmup_checks: 1
+      max_copy_ratio: 1.0
+      min_self_gap_issued: 0.02
+      min_mask_precision: 0.8
+      min_mask_recall: 0.8
+    analyze_every: 25       # open-loop / reward-corr / mask-acc dynamics report
+    bots: [randomBiasedAI, workerRushAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    reward: dense_shaped    # SAME weighting the v3 store was collected with —
+                            # the pretrained reward head predicts exactly this
+    league:                 # bot/self-play league (mirrors the PPO league):
+      enabled: true         # collection alternates bot blocks and self-play blocks
+      bot_steps: 1000000    # pure-bot warmup (fresh actor needs scripted pressure)
+      mix_bot_block: 500000     # then ~50/50 alternation: bots fight forgetting,
+      mix_selfplay_block: 500000  # self-play pushes past the scripted ceiling
+      snapshot_every: 200000  # push a frozen (tokenizer+actor) snapshot to the pool
+      pool_capacity: 8
+      recency_bias: 2.0     # newer snapshots sampled more often
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 5
+    envs_per_bot: 4
+    max_steps: 2000
+    bots: [randomBiasedAI, workerRushAI, coacAI]
+    greedy: true
+  checkpoint:
+    every_iters: 100
+    keep_last: 3
+    monitor: eval/win_rate  # THE gate — never select on imagined return
+    mode: max
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, rl, hybrid, wm-finetune, pretrained-v4.4,
+         opp-policy-head, dream-opponent]

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -55,6 +56,7 @@ class BaseTrainer:
         self.device = resolve_device(device or cfg.run.get("device", "auto"))
         self._wandb = None
         self.use_wandb = True  # entrypoints flip this off via --no-wandb
+        self._wandb_key = None  # entrypoints set this via --wandb-key
         self.verbose = cfg.run.get("verbose", True)  # console prints
         self._t_start = None
 
@@ -63,15 +65,81 @@ class BaseTrainer:
         self.run_dir = Path(cfg.run.get("ckpt_dir", "checkpoints")) / self.run_name
 
         # Best-metric tracking config.
-        ckpt_cfg = cfg.training.get("checkpoint", {}) if hasattr(cfg, "training") else {}
+        ckpt_cfg = (
+            cfg.training.get("checkpoint", {}) if hasattr(cfg, "training") else {}
+        )
         self.ckpt_every = ckpt_cfg.get("every_iters", 50)
         self.keep_last = ckpt_cfg.get("keep_last", 3)
         self.monitor = ckpt_cfg.get("monitor", "eval/win_rate")
         self.monitor_mode = ckpt_cfg.get("mode", "max")
-        self._best_metric = -float("inf") if self.monitor_mode == "max" else float("inf")
+        self._best_metric = (
+            -float("inf") if self.monitor_mode == "max" else float("inf")
+        )
         self._eval_history: list[dict] = []
 
     # --- W&B -------------------------------------------------------------
+    def _resolve_wandb_key(self, wandb) -> bool:
+        """Ensure we have a W&B API key, without ever crashing on a missing one.
+
+        Resolution order: explicit ``--wandb-key`` (stashed on ``self._wandb_key``)
+        -> ``WANDB_API_KEY`` env var -> a key already saved in the container's
+        ``~/.netrc`` (from a previous run). If none is found we *prompt* (when a TTY
+        is attached): the user can paste a key or press Enter to disable W&B for this
+        run. A pasted key is persisted with ``wandb.login`` so it lives in the
+        container's ``~/.netrc`` and survives ``docker exec``/restart (until the image
+        is rebuilt). Returns True if authenticated, False if W&B should be disabled.
+        """
+        key = getattr(self, "_wandb_key", None) or os.environ.get("WANDB_API_KEY")
+        if not key:
+            # Already logged in (netrc from a prior run in this container)?
+            try:
+                if wandb.api.api_key:
+                    return True
+            except Exception:
+                pass
+        if key:
+            # Persist an explicitly-provided key so future runs need no flag/env.
+            try:
+                wandb.login(key=key, relogin=True)
+                self.console(
+                    "[wandb] key saved to the container's ~/.netrc "
+                    "(persists until the image is rebuilt)."
+                )
+            except Exception as e:
+                self.console(f"[wandb] login failed ({e}); disabling W&B for this run.")
+                return False
+            return True
+
+        # No key anywhere — ask, but never crash.
+        if not sys.stdin.isatty():
+            self.console(
+                "[wandb] no API key found (checked --wandb-key / WANDB_API_KEY "
+                "/ ~/.netrc) and no TTY to prompt; disabling W&B for this run. "
+                "Re-run with -it, pass --wandb-key, or use --no-wandb."
+            )
+            return False
+        print(
+            "\n[wandb] No Weights & Biases API key found "
+            "(checked --wandb-key, WANDB_API_KEY, and ~/.netrc)."
+        )
+        ans = input(
+            "[wandb] Paste your API key to enable logging, or press Enter to "
+            "disable W&B for this run: "
+        ).strip()
+        if not ans:
+            self.console("[wandb] disabled for this run.")
+            return False
+        try:
+            wandb.login(key=ans, relogin=True)
+            self.console(
+                "[wandb] key saved to the container's ~/.netrc "
+                "(persists until the image is rebuilt)."
+            )
+        except Exception as e:
+            self.console(f"[wandb] login failed ({e}); disabling W&B for this run.")
+            return False
+        return True
+
     def init_wandb(self):
         if not self.use_wandb:
             return None  # --no-wandb: log() becomes a no-op (self._wandb stays None)
@@ -79,8 +147,9 @@ class BaseTrainer:
             return self._wandb
         import wandb
 
-        if not os.environ.get("WANDB_API_KEY"):
-            wandb.login()
+        if not self._resolve_wandb_key(wandb):
+            self.use_wandb = False
+            return None
 
         wb = self.cfg.wandb
         self._wandb = wandb.init(
@@ -128,10 +197,23 @@ class BaseTrainer:
             self._wandb = None
 
     def _flat_config(self) -> dict:
-        return {"run": self.cfg.run, "model": self.cfg.model, "training": self.cfg.training}
+        return {
+            "run": self.cfg.run,
+            "model": self.cfg.model,
+            "training": self.cfg.training,
+        }
 
     # --- checkpoints -----------------------------------------------------
-    def save_checkpoint(self, policy, optimizer, step, metrics=None, tag="latest") -> Path:
+    def save_checkpoint(
+        self,
+        policy,
+        optimizer,
+        step,
+        metrics=None,
+        tag="latest",
+        scheduler=None,
+        extra=None,
+    ) -> Path:
         """Atomically write a full checkpoint and rotate old ``step_*`` ones.
 
         ``model`` holds the entire policy state_dict, which contains the encoder,
@@ -142,11 +224,13 @@ class BaseTrainer:
             "step": int(step),
             "model": policy.state_dict(),
             "optimizer": optimizer.state_dict() if optimizer is not None else None,
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "metrics": metrics or {},
             "monitor": self.monitor,
             "best_metric": self._best_metric,
             "config": self._flat_config(),
         }
+        payload.update(extra or {})
         path = self.run_dir / f"{tag}.pt"
         tmp = path.with_suffix(".pt.tmp")
         torch.save(payload, tmp)
@@ -163,11 +247,33 @@ class BaseTrainer:
         for stale in ckpts[: max(0, len(ckpts) - self.keep_last)]:
             stale.unlink(missing_ok=True)
 
-    def load_checkpoint(self, policy, optimizer=None, tag="latest") -> dict:
-        payload = torch.load(self.run_dir / f"{tag}.pt", map_location=self.device)
+    def load_checkpoint(
+        self, policy, optimizer=None, tag="latest", scheduler=None
+    ) -> dict:
+        path = Path(tag)
+        if path.suffix != ".pt" or not path.is_file():
+            path = self.run_dir / f"{tag}.pt"
+        payload = torch.load(path, map_location=self.device, weights_only=False)
         policy.load_state_dict(payload["model"])
         if optimizer is not None and payload.get("optimizer") is not None:
             optimizer.load_state_dict(payload["optimizer"])
+        if scheduler is not None and payload.get("scheduler") is not None:
+            scheduler.load_state_dict(payload["scheduler"])
+        if payload.get("best_metric") is not None:
+            self._best_metric = float(payload["best_metric"])
+        return payload
+
+    def load_weights_from(self, policy, path) -> dict:
+        """Warm-start: load *only* the model weights from an arbitrary checkpoint
+        (typically the best.pt of a *different* run). Unlike ``load_checkpoint`` this
+        does not touch the optimizer, step, or best-metric — the new run starts fresh
+        at step 0 with its own LR schedule and curriculum, standing on the loaded
+        policy. ``path`` may be absolute or relative to the process CWD (repo root)."""
+        p = Path(path)
+        if not p.is_file():
+            raise FileNotFoundError(f"init_from checkpoint not found: {p}")
+        payload = torch.load(p, map_location=self.device, weights_only=False)
+        policy.load_state_dict(payload["model"])
         return payload
 
     # --- eval history + best tracking ------------------------------------
@@ -178,7 +284,15 @@ class BaseTrainer:
             return value > self._best_metric
         return value < self._best_metric
 
-    def record_eval(self, step, eval_metrics, policy=None, optimizer=None) -> bool:
+    def record_eval(
+        self,
+        step,
+        eval_metrics,
+        policy=None,
+        optimizer=None,
+        scheduler=None,
+        extra=None,
+    ) -> bool:
         """Append an eval record, update best, optionally save ``best.pt``.
 
         Returns whether this eval is a new best on the monitored metric. The
@@ -202,7 +316,15 @@ class BaseTrainer:
             json.dump(self._eval_history, f, indent=2)
 
         if is_best and policy is not None:
-            self.save_checkpoint(policy, optimizer, step, eval_metrics, tag="best")
+            self.save_checkpoint(
+                policy,
+                optimizer,
+                step,
+                eval_metrics,
+                tag="best",
+                scheduler=scheduler,
+                extra=extra,
+            )
             with open(self.run_dir / "best.json", "w") as f:
                 json.dump(record, f, indent=2)
         return is_best

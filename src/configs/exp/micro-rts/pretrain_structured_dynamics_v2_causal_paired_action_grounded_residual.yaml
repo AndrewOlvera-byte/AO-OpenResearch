@@ -1,0 +1,107 @@
+# Deterministic structured dynamics with a transferred action-to-delta bridge.
+# The frozen action code remains auditable; its pretrained forward router supplies
+# the initial residual transition and a zero-initialized transformer learns only
+# corrections. Explicit endpoint routing and canonical field grounding target the
+# measured spatial/content failure rather than increasing model size.
+run:
+  name: pretrain_structured_dynamics_v2_causal_paired_action_grounded_residual
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: causal_paired
+  amp: true
+  steps: 160000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+
+  # Preserve the proven latent objective while directly optimizing direction,
+  # magnitude, and decoded deterministic fields.
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 4.0
+  causal_effect_cosine_coef: 0.25
+  causal_effect_norm_coef: 0.10
+  canonical_grounding_coef: 0.10
+  canonical_changed_boost: 8.0
+  active_token_boost: 1.0
+  changed_token_boost: 8.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 0.05
+
+  # Raise paired rows from ~20% to 50% while retaining HDF5 chunk locality.
+  # This yields roughly five nonzero one-tick interventions per batch rather
+  # than two on the measured corpus.
+  paired_batch_fraction: 0.50
+
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 64
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 1
+  probe_samples: 256
+  warmup_steps: 1000
+  lr_stages:
+    - {end_step: 60000, start_frac: 1.0, end_frac: 0.1}
+    - {end_step: 100000, start_frac: 0.3, end_frac: 0.1, warmup_steps: 500}
+    - {end_step: 160000, start_frac: 0.1, end_frac: 0.025}
+  lr_min_frac: 0.025
+  log_every: 100
+  average_train_metrics: true
+
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  action_tokenizer_ckpt: checkpoints/structured_action_tokenizer_v2.pt
+  freeze_action_encoder: true
+  freeze_action_router: false
+  action_router_lr_scale: 0.10
+  out: checkpoints/structured_dynamics_v2_causal_paired_action_grounded_residual.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/wm/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_causal_paired_action_grounded_residual
+  tags: [micro-rts, structured-v2, causal-paired, deterministic, residual,
+         action-tokenizer, pretrained-router, spatial-routing, canonical-grounding]

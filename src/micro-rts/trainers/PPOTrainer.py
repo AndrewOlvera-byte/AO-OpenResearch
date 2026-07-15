@@ -211,6 +211,7 @@ class PPOTrainer(BaseTrainer):
         resume_tag = getattr(self, "_resume_from", None)
         env = self._build_env(cur.env_config(0), cur.reward_weight_vec(0))
         self._attach(self._build_policy(env))
+        init_from = self.cfg.run.get("init_from")
         if resume_tag is not None:
             payload = self.load_checkpoint(self.policy, self.opt, tag=resume_tag)
             start_step = int(payload["step"])
@@ -219,6 +220,13 @@ class PPOTrainer(BaseTrainer):
                 env = self._build_env(cur.env_config(start_step), cur.reward_weight_vec(start_step))
             self.console(f"[resume] loaded '{resume_tag}.pt' @ step {start_step:,} "
                          f"(best {self.monitor}={self._best_metric:+.4f})")
+        elif init_from:
+            # Warm-start a fresh run from another run's checkpoint (weights only):
+            # step/optimizer/best reset, LR schedule + curriculum start at 0.
+            payload = self.load_weights_from(self.policy, init_from)
+            self.console(f"[init] warm-started weights from {init_from} "
+                         f"(source step {int(payload.get('step', 0)):,}); "
+                         f"fresh optimizer, run starts at step 0")
         collector = self._make_collector(env, cur.phase(start_step), horizon)
         self.init_wandb()
 

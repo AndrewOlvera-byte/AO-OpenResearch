@@ -1,0 +1,122 @@
+# DreamerV4 RL, mode=IMAGINATION — the full Dreamer 4 pretrain-then-RL recipe.
+#
+# Actor + critic train PURELY inside the frozen pretrained world model: replay
+# contexts seed `imagine()`, the actor acts under the tokenizer's predicted masks,
+# rewards/continues come from the pretrained heads, and the only thing the real
+# env provides is fresh on-policy contexts (and eval games). The trainer enforces
+# tokenizer+world_model frozen in this mode regardless of `model.freeze`.
+#
+# ARCH: the `model:` block below MUST match pretrain_dreamerv4_dynamics_v2.yaml
+# byte-for-byte (minus lr/clip), or `training.dreamer.init_from` will refuse to
+# load. The v2 checkpoint carries the frozen tokenizer and `latent_scale`.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_rl.py \
+#       --exp micro-rts/rl_dreamerv4_imagination
+#
+# The three rl_dreamerv4_* configs differ ONLY in mode/freeze/lr so their
+# eval/win_rate-vs-env-steps curves are directly comparable (sample efficiency):
+#   imagination  — this file (frozen WM, the Dreamer 4 experience)
+#   hybrid       — WM keeps finetuning on fresh replay while the actor dreams
+#   online       — actor/critic on real sequences, no WM in the loop (baseline)
+
+run:
+  name: rl_dreamerv4_imagination
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4          # unused: world group is frozen in this mode
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH the v2 pretrain configs EXACTLY >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # ~47.6M-param transformer from dreamer_dynamics_v2.pt
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true         # enforced by mode=imagination anyway
+    world_model: true
+    actor: false
+    critic: false
+
+data: {}
+
+training:
+  iters: 5000               # x 2,048 env steps/iter = ~10.2M env steps
+  dreamer:
+    mode: imagination
+    init_from: checkpoints/dreamer_dynamics_v2.pt
+    amp: true               # bf16 autocast: halves activation VRAM + flash attn in bf16
+    buffer_device: cpu      # ring buffer in RAM, not VRAM (obs stored uint8)
+    num_envs: 32
+    horizon: 64             # env steps per collect -> 2,048 fresh transitions/iter
+    seq_len: 16             # replayed sequence length (imagine_context 8 fits inside)
+    batch_seqs: 16          # sequences per update = imagination seeds
+    buffer_capacity: 2048   # ring rows (x num_envs transitions)
+    warmup_steps: 1024
+    train_ratio: 0.5        # -> 4 actor/critic updates per iter
+    imagine_horizon: 15
+    use_flow: true          # irrelevant while the world group is frozen
+    flow_coef: 1.0
+    flow_self_frac: 0.25
+    analyze_every: 25       # open-loop / reward-corr / mask-acc dynamics report
+    bots: [randomBiasedAI, workerRushAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    reward: dense_shaped    # SAME weighting the v2 store was collected with —
+                            # the pretrained reward head predicts exactly this
+    league:                 # bot/self-play league (mirrors the PPO league):
+      enabled: true         # collection alternates bot blocks and self-play blocks
+      bot_steps: 1000000    # pure-bot warmup (fresh actor needs scripted pressure)
+      mix_bot_block: 500000     # then ~50/50 alternation: bots fight forgetting,
+      mix_selfplay_block: 500000  # self-play pushes past the scripted ceiling
+      snapshot_every: 200000  # push a frozen (tokenizer+actor) snapshot to the pool
+      pool_capacity: 8
+      recency_bias: 2.0     # newer snapshots sampled more often
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 5
+    envs_per_bot: 4
+    max_steps: 2000
+    bots: [randomBiasedAI, workerRushAI, coacAI]
+    greedy: true
+  checkpoint:
+    every_iters: 100
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, rl, imagination, frozen-wm, pretrained-v2]

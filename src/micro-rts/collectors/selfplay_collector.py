@@ -50,8 +50,9 @@ class SelfPlayCollector:
             learn_out = self.learner.step(learn_obs, learn_mask)
             opp_out = self.opponent.step(opp_obs, opp_mask)
 
+            # Trailing dims come from the head: (7,) single-unit or (H*W, 7) gridnet.
             actions = torch.empty(
-                self.env.num_envs, learn_out["action"].shape[-1],
+                (self.env.num_envs, *learn_out["action"].shape[1:]),
                 dtype=learn_out["action"].dtype, device=learn_out["action"].device,
             )
             actions[0::2] = learn_out["action"]

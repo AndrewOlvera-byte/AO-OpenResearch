@@ -21,6 +21,34 @@ def test_phase_schedule_and_freeze():
     assert not cur.should_rebuild_env(0, 999)
 
 
+def test_mixed_bot_selfplay_block_schedule():
+    """After the pure-bot warmup, phase alternates bot/self-play by block."""
+    cur = PPOCurriculum(bot_steps=100, mix_bot_block=30, mix_selfplay_block=20, num_envs=4)
+    # Warmup region: pure bot.
+    assert cur.phase(0) == "bot"
+    assert cur.phase(99) == "bot"
+    # First mixed cycle starts at 100: 30 bot, then 20 self-play (cycle length 50).
+    assert cur.phase(100) == "bot"          # pos 0
+    assert cur.phase(129) == "bot"          # pos 29
+    assert cur.phase(130) == "selfplay"     # pos 30
+    assert cur.phase(149) == "selfplay"     # pos 49
+    assert cur.phase(150) == "bot"          # pos 0 of next cycle
+    # env_config follows the phase, and the trainer rebuilds at each block boundary.
+    assert cur.env_config(120).mode == "bot"
+    assert cur.env_config(140).mode == "selfplay"
+    assert cur.should_rebuild_env(129, 130)   # bot -> selfplay
+    assert cur.should_rebuild_env(149, 150)   # selfplay -> bot
+    assert not cur.should_rebuild_env(100, 129)
+
+
+def test_mixing_disabled_falls_back_to_classic_schedule():
+    """With either block 0, the schedule is the classic pure-bot-then-self-play."""
+    cur = PPOCurriculum(bot_steps=100, mix_bot_block=0, mix_selfplay_block=20, num_envs=4)
+    assert cur.phase(99) == "bot"
+    assert cur.phase(100) == "selfplay"
+    assert cur.phase(10_000) == "selfplay"
+
+
 def test_on_step_freeze_and_pool_growth():
     cur = PPOCurriculum(bot_steps=0, freeze_steps=100, snapshot_every=50, num_envs=4)
     policy = CNNMLPPolicy(OBS, NVEC, device="cpu")

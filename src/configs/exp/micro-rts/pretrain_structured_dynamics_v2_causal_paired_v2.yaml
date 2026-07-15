@@ -1,0 +1,90 @@
+# Completed 2026-07-14: WandB run 0qn6haqk.
+# Best checkpoint: step 39000; val paired_cf=0.1783, effect cosine=0.6548,
+# effect norm ratio=0.7063. Retained as the initialization for v3 continuation.
+run:
+  name: pretrain_structured_dynamics_v2_causal_paired_v2
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    # Complete-state MicroRTS mechanics are deterministic. At one step, zero is
+    # cleaner than Gaussian target noise the transformer must learn to cancel.
+    initial_noise: zero
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: causal_paired
+  amp: true
+  # Preserve the learned causal geometry, but restart optimization from the
+  # best (step 55k) weights with a fresh fine-tuning schedule.
+  init_from: checkpoints/pretrain_structured_dynamics_v2_causal_paired/best.pt
+  steps: 40000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 3.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  # The first run learned direction but underpredicted intervention magnitude.
+  causal_effect_coef: 4.0
+  active_token_boost: 1.0
+  changed_token_boost: 8.0
+  # Corpus quantiles: 1e-5 marked ~63% of valid factual tokens; 1e-3 marks
+  # ~23%, retaining the mechanics-relevant tail without becoming near-uniform.
+  change_threshold: 1.0e-3
+  # Keep unused packed entity outputs close to the tokenizer padding vector.
+  # They remain low weight but can no longer drift and pollute decoder attention.
+  padding_token_weight: 0.05
+
+  val_frac: 0.05
+  eval_every: 500
+  eval_batches: 16
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 1
+  probe_samples: 64
+  save_every: 2500
+  warmup_steps: 500
+  # Cosine decay from 3e-5 to approximately 1e-5.
+  lr_min_frac: 0.333333
+  log_every: 100
+  average_train_metrics: true
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  out: checkpoints/structured_dynamics_v2_causal_paired_v2.pt
+  checkpoint:
+    every_steps: 2500
+    keep_last: 3
+    monitor: val/wm/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_causal_paired_v2
+  tags: [micro-rts, structured-v2, causal-paired, deterministic, finetune]

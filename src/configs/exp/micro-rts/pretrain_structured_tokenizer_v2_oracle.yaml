@@ -1,0 +1,45 @@
+run:
+  name: pretrain_structured_tokenizer_v2_oracle
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 1
+    depth: 2
+    n_heads: 4
+    dropout: 0.0
+    max_unit_types: 16
+    max_entities: 128
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  amp: true
+  steps: 50000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 10.0
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 8
+  save_every: 5000
+  warmup_steps: 500
+  lr_min_frac: 0.1
+  log_every: 100
+  stats_batches: 32
+  out: checkpoints/structured_tokenizer_v2_oracle.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/tok/total
+    mode: min
+    resume: false
+    resume_from: latest

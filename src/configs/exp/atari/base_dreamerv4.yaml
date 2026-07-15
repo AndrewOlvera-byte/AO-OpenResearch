@@ -1,0 +1,115 @@
+# DreamerV4 model-based RL on Atari (Pong) — small architecture, single-GPU (16 GB).
+#
+# Purpose: an end-to-end eval that our shared DreamerV4 stack (tokenizer + block-causal
+# world model + shortcut-forcing dynamics + imagination actor-critic) actually learns,
+# on a well-understood benchmark. Pong is the fastest signal (a competent agent reaches
+# positive return quickly); switch `training.env.game` for others.
+#
+# Sizing rationale (fits comfortably in 16 GB):
+#   - small world model: d_model 256, depth 5 (DreamerV3 "small" class), 64x64
+#     grayscale frame stacks -> 16 latent tokens/observation, so sequences are cheap.
+#   - batch_seqs 16 x seq_len 64 = 1024 replayed timesteps/update.
+#   - train_ratio 32 matches the published DreamerV3 Atari recipe. With 8 envs and
+#     horizon 16 this derives to 4 world/actor/critic updates per collection.
+#   - imagination capped at 256 start latents x horizon 15 to bound the autoregressive
+#     rollout memory. Raise batch_seqs / imagine_seeds if VRAM allows.
+#
+# Hyperparameters follow the DreamerV3/4 Atari recipe: imagination horizon 15,
+# gamma 0.997, lambda 0.95, slow critic EMA 0.98, world lr 1e-4, actor lr 3e-5.
+#
+# NB: run in its own process (see entrypoint) — src/atari and src/micro-rts both expose
+# top-level `models`/`environments`, so they cannot share a Python interpreter.
+
+run:
+  name: atari_dreamerv4_pong
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: atari_dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 1000.0
+  tokenizer:
+    base_channels: 32
+    d_latent: 32
+    downsample: 16
+    tanh_bottleneck: true
+  dynamics:
+    d_model: 256
+    depth: 5
+    n_heads: 8
+    n_register: 4
+    mlp_ratio: 4.0
+    time_every: 2
+    k_max: 16
+  actor_critic:
+    hidden: [512]
+    imagine_horizon: 15
+    gamma: 0.997
+    lam: 0.95
+    entropy_coef: 3.0e-4
+    critic_ema: 0.98
+    unimix: 0.01
+    actor_outscale: 0.01
+    # DreamerV3-style percentile return scale for the policy objective. This avoids
+    # batch std blow-ups when imagined returns are still mostly zero.
+    normalize_adv: false
+    return_norm: percentile
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+    return_norm_low: 5.0
+    return_norm_high: 95.0
+
+data: {}
+
+training:
+  iters: 20000
+  dreamer:
+    horizon: 16              # env steps collected per iteration (per env)
+    seq_len: 64              # world-model training sequence length
+    batch_seqs: 16           # sequences per world-model update
+    train_ratio: 32          # replayed train steps per real env step (derives updates)
+    buffer_capacity: 2000    # ring-buffer length (x num_envs transitions)
+    warmup_steps: 1024       # total env transitions before the first update
+    imagine_horizon: 15
+    imagine_seeds: 256       # max start latents per actor-critic update
+    grad_clip: 1000.0
+    use_flow: true           # shortcut-forcing generative dynamics loss
+    flow_coef: 1.0
+    recon_dynamic_coef: 5.0  # avoid static-background Atari recon collapse
+    reward_balance_nonzero: true  # sparse Pong score events should not vanish in mean CE
+  env:
+    game: pong
+    num_envs: 8
+    frameskip: 4
+    frame_stack: 4
+    resize: 64
+    grayscale: true
+    max_steps: 27000
+    noop_max: 30
+    sticky: 0.0
+    full_action_space: false
+    clip_reward: false          # DreamerV3 Atari uses unclipped rewards with symlog heads.
+    reward_scale: 1.0
+    dense_reward: pong_potential
+    dense_reward_coef: 0.05     # small PBRS hint; true score still dominates returns/eval.
+    dense_reward_gamma: 0.997
+    dense_reward_clip: 0.05
+  eval:
+    enabled: true
+    every_iters: 250
+    steps: 1000
+    num_envs: 8
+    greedy: true
+  checkpoint:
+    every_iters: 250
+  console:
+    every_iters: 10
+
+wandb:
+  project: atari-dreamer
+  entity: andrewolvera

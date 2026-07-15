@@ -125,3 +125,28 @@ def test_gridnet_env_roundtrip_and_update():
         assert all(v == v for v in m.values())               # finite
     finally:
         env.close()
+
+
+def test_gridnet_selfplay_collector_action_shape():
+    """Regression: the self-play collector must interleave the GridNet (N,256,7)
+    action for learner and opponent lanes. The prior run crashed here trying to
+    assign a 3-D action into a 2-D buffer at the bot->self-play transition."""
+    from core.registry import build
+    import models.gridnet_policy  # noqa: F401  (register cnn_gridnet)
+    from environments.microrts_env import EnvConfig, MicroRTSVecEnv
+    from collectors.selfplay_collector import SelfPlayCollector
+
+    env = MicroRTSVecEnv(EnvConfig(num_envs=4, max_steps=250, mode="selfplay",
+                                   gridnet=True))
+    try:
+        learner = build("model", type="cnn_gridnet", obs_shape=env.obs_shape,
+                        action_nvec=env.action_nvec, device="cpu")
+        opp = build("model", type="cnn_gridnet", obs_shape=env.obs_shape,
+                    action_nvec=env.action_nvec, device="cpu")
+        col = SelfPlayCollector(env, learner, opp, horizon=4, device="cpu")
+        # Buffer holds only the learner lanes (num_envs // 2) with the gridnet shape.
+        assert tuple(col.buffer.data["action"].shape) == (4, 2, 256, 7)
+        buf = col.collect()
+        assert torch.isfinite(buf.data["advantage"]).all()
+    finally:
+        env.close()

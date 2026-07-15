@@ -1,0 +1,102 @@
+# DreamerV4 model-based RL on MicroRTS — from-scratch, GridNet-style, masked.
+#
+# The full Dreamer 4 recipe on the 16x16 full game: GridNet CNN tokenizer (with a
+# predicted action-mask head for imagination), a block-causal transformer world
+# model trained with SHORTCUT FORCING (diffusion forcing + x-prediction, verified
+# against nicklashansen/dreamer4), CNN-GridNet multi-token action encoding, and an
+# imagination-trained GridNet actor (invalid-action masking) + symlog two-hot
+# critic with a slow EMA target and DreamerV3 percentile return normalization.
+#
+# Staging: `model.freeze` supports pretrain-then-RL splits —
+#   world-model pretrain:  freeze: {actor: true, critic: true}
+#   RL on frozen WM:       freeze: {tokenizer: true, world_model: true}
+# Frozen groups drop out of the optimizer set and the trainer skips their updates.
+
+run:
+  name: base_dreamerv4
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 1000.0
+  detach_latents: true      # tokenizer shaped by reconstruction only (Dreamer 4 phases)
+  tokenizer:
+    enc_channels: 64
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:
+    d_model: 256
+    depth: 4
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16               # dyadic shortcut grid (power of two)
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8      # replay frames of world-model memory before the actor takes over
+    imagine_flow_steps: 4   # shortcut denoise steps per imagined frame (power of two)
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3    # GridNet entropy sums over cells — keep the bonus small
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: false
+    world_model: false
+    actor: false
+    critic: false
+
+data: {}
+
+training:
+  iters: 20000
+  dreamer:
+    num_envs: 32
+    horizon: 64             # env steps per collect -> 2,048 fresh transitions/iter
+    seq_len: 16             # replayed sequence length (world-model context)
+    batch_seqs: 16          # sequences per update = imagination seeds (context-seeded)
+    buffer_capacity: 2048   # ring rows (x num_envs transitions)
+    warmup_steps: 1024
+    train_ratio: 0.5        # replayed / collected — derives wm_updates per iter
+    imagine_horizon: 15
+    use_flow: true
+    flow_coef: 1.0
+    flow_self_frac: 0.25    # share of the batch on the self-consistency objective
+    analyze_every: 25       # open-loop / reward-corr / mask-acc dynamics report
+    bots: [randomBiasedAI, workerRushAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    reward: dense_shaped
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 100
+    games: 5
+    envs_per_bot: 4
+    max_steps: 2000
+    bots: [randomBiasedAI, workerRushAI, coacAI]
+    greedy: true
+  checkpoint:
+    every_iters: 100
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, model-based, gridnet, masked, shortcut-forcing]

@@ -33,5 +33,11 @@ RUN pip install --no-build-isolation -e .
 # Copy project code (editable install above already wired up dependencies).
 COPY . /workspace
 
+# Patch gym-microrts' vendored microrts.jar so the pre-reset terminal
+# observation is exposed to Python (stock 0.3.2 auto-resets before Python sees
+# it, starving the world model's continue/win-reward supervision). See
+# infra/microrts-jar-patch/JNIGridnetVecClient.java.
+RUN bash infra/microrts-jar-patch/apply_patch.sh
+
 # Keep container running for interactive CLI access.
 CMD ["tail", "-f", "/dev/null"]
