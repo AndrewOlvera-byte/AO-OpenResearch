@@ -18,7 +18,7 @@ Usage (inside the container)::
 
     # tiny CPU smoke (fresh frozen tokenizer, a couple of steps):
     python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-        --data '/data/micro-rts/debug__*.h5' --exp micro-rts/smoke_dreamerv4 --smoke
+        --data '/data/micro-rts/debug__*.h5' --exp micro-rts/rl/smoke/smoke_dreamerv4 --smoke
 
 Without ``--tokenizer-ckpt`` the tokenizer is randomly initialized and frozen
 (only meaningful for the smoke path). Model arch comes from ``--exp``; obs/action
@@ -115,6 +115,7 @@ def _main_structured(args, cfg):
         StructuredDynamicsConfig,
         StructuredTokenizerConfig,
         StructuredWorldModelV2,
+        structured_tokenizer_state_dict,
     )
     from models.dreamer_v2.dynamics import (
         structured_action_gap_probe,
@@ -212,7 +213,7 @@ def _main_structured(args, cfg):
             tc.d_cell, tc.d_latent, tc.depth, tc.n_heads = 16, 16, 1, 4
     model = StructuredWorldModelV2(ds.grid_hw, tc, dc).to(device)
     if ckpt:
-        model.tokenizer.load_state_dict(ckpt["model"])
+        model.tokenizer.load_state_dict(structured_tokenizer_state_dict(ckpt))
     model.tokenizer.requires_grad_(False)
     model.tokenizer.eval()
     if ckpt and "latent_mean" in ckpt:
@@ -356,6 +357,21 @@ def _main_structured(args, cfg):
                 canonical_changed_boost=float(
                     tr.get("canonical_changed_boost", 0.0)
                 ),
+                canonical_effect_margin_coef=float(
+                    tr.get("canonical_effect_margin_coef", 0.0)
+                ),
+                canonical_effect_margin=float(
+                    tr.get("canonical_effect_margin", 1.0)
+                ),
+                rollout_grounding_coef=float(
+                    tr.get("rollout_grounding_coef", 0.0)
+                ),
+                rollout_latent_coef=float(tr.get("rollout_latent_coef", 0.0)),
+                rollout_horizon=int(tr.get("rollout_horizon", 1)),
+                rollout_discount=float(tr.get("rollout_discount", 1.0)),
+                rollout_batch_fraction=float(
+                    tr.get("rollout_batch_fraction", 1.0)
+                ),
                 residual_correction_coef=float(
                     tr.get("residual_correction_coef", 0.0)
                 ),
@@ -419,6 +435,13 @@ def _main_structured(args, cfg):
             f"active_boost={float(tr.get('active_token_boost', 1.0))} "
             f"changed_boost={float(tr.get('changed_token_boost', 4.0))} "
             f"padding_weight={float(tr.get('padding_token_weight', 0.0))} "
+            f"canonical={float(tr.get('canonical_grounding_coef', 0.0))} "
+            f"categorical_margin="
+            f"{float(tr.get('canonical_effect_margin_coef', 0.0))} "
+            f"rollout_h={int(tr.get('rollout_horizon', 1))} "
+            f"rollout_canonical="
+            f"{float(tr.get('rollout_grounding_coef', 0.0))} "
+            f"rollout_latent={float(tr.get('rollout_latent_coef', 0.0))} "
             f"correction_coef={float(tr.get('residual_correction_coef', 0.0))} "
             f"initial_noise={dc.initial_noise} "
             f"flow_head={init_kind}; one-step inference; "
@@ -509,7 +532,13 @@ def _main_structured(args, cfg):
                     f"effect_cos={vals['val/causal/effect_cosine']:.4f} "
                     f"effect_norm={vals['val/causal/effect_norm_ratio']:.3f} "
                     f"effect_norm_agg="
-                    f"{vals['val/causal/effect_norm_ratio_aggregate']:.3f}"
+                    f"{vals['val/causal/effect_norm_ratio_aggregate']:.3f} "
+                    f"canonical="
+                    f"{vals['val/causal/grounding_factual']:.3f} "
+                    f"cat_margin="
+                    f"{vals['val/causal/categorical_effect_margin']:.3f} "
+                    f"rollout={vals['val/rollout/grounding']:.3f}/"
+                    f"{vals['val/rollout/latent']:.3f}"
                 )
             else:
                 objective_metrics = (
@@ -577,7 +606,12 @@ def _main_structured(args, cfg):
                     f"effect_cos={float(report['causal/effect_cosine']):.4f} "
                     f"effect_norm={float(report['causal/effect_norm_ratio']):.3f} "
                     f"effect_norm_agg="
-                    f"{float(report['causal/effect_norm_ratio_aggregate']):.3f}"
+                    f"{float(report['causal/effect_norm_ratio_aggregate']):.3f} "
+                    f"canonical={float(report['causal/grounding_factual']):.3f} "
+                    f"cat_margin="
+                    f"{float(report['causal/categorical_effect_margin']):.3f} "
+                    f"rollout={float(report['rollout/grounding']):.3f}/"
+                    f"{float(report['rollout/latent']):.3f}"
                 )
             else:
                 objective_metrics = (
@@ -627,7 +661,7 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--exp",
-        default="micro-rts/pretrain_dreamerv4_dynamics",
+        default="micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics",
         help="experiment config (holds model arch + training:/data: blocks)",
     )
     # All optional overrides — None means 'take it from the config'.

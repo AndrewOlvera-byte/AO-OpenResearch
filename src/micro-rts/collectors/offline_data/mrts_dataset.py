@@ -55,6 +55,23 @@ _TASK_FIELDS = {
         "is_first",
     ),
     "structured_tokenizer": ("state", "globals", "obs", "mask"),
+    # Observation-tokenizer temporal JEPA retains the complete reconstruction
+    # contract while adding factual and cloned action-conditioned transitions.
+    "structured_tokenizer_jepa": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "obs",
+        "mask",
+        "counterfactual_action",
+        "counterfactual_opponent_action",
+        "counterfactual_next_state",
+        "counterfactual_next_globals",
+        "counterfactual_valid",
+    ),
     # structured_flow_loss currently consumes exactly these six fields. Loading
     # counterfactual arrivals and bookkeeping here more than doubles decompression.
     "structured_dynamics": (
@@ -108,6 +125,20 @@ _TASK_FIELDS = {
         "counterfactual_next_state",
         "counterfactual_next_globals",
         "counterfactual_valid",
+    ),
+    # Phase-2/online Dreamer agent heads: behavior priors and arrive-aligned
+    # reward/continue heads on the same Markov-complete state representation.
+    "structured_rl": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "mask",
+        "reward",
+        "done",
+        "is_first",
     ),
 }
 
@@ -188,6 +219,7 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
                 name for name in self.fields if name in f or name in derived
             )
             if task in (
+                "structured_tokenizer_jepa",
                 "structured_dynamics_paired",
                 "structured_action_tokenizer",
             ):

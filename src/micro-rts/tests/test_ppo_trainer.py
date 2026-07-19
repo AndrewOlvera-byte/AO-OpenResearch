@@ -25,7 +25,7 @@ def test_legacy_update_moves_weights():
 
 
 def test_config_mode_smoke_test():
-    cfg = Config.from_experiment("micro-rts/base_rlFS_expert")
+    cfg = Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert")
     trainer = PPOTrainer(cfg=cfg)
     trainer.device = torch.device("cpu")  # keep CI off the GPU
     metrics = trainer.smoke_test()
@@ -34,7 +34,7 @@ def test_config_mode_smoke_test():
 
 
 def test_gridnet_config_smoke_test():
-    cfg = Config.from_experiment("micro-rts/base_rlFS_expert_masked")
+    cfg = Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert_masked")
     trainer = PPOTrainer(cfg=cfg)
     trainer.device = torch.device("cpu")
     metrics = trainer.smoke_test()  # builds gridnet env + gridnet policy, collect+update
@@ -43,13 +43,13 @@ def test_gridnet_config_smoke_test():
 
 def test_anneal_lr_read_from_config():
     # gridnet config opts into LR annealing; the legacy config leaves it off (default).
-    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/base_rlFS_expert_masked")).anneal_lr is True
-    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/base_rlFS_expert")).anneal_lr is False
+    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert_masked")).anneal_lr is True
+    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert")).anneal_lr is False
 
 
 def test_amp_flag_read_from_config():
-    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/base_rlFS_expert_masked")).amp is True
-    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/base_rlFS_expert")).amp is False
+    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert_masked")).amp is True
+    assert PPOTrainer(cfg=Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert")).amp is False
 
 
 def test_checkpoint_resume_roundtrip(tmp_path):
@@ -58,7 +58,7 @@ def test_checkpoint_resume_roundtrip(tmp_path):
     def fresh():
         return build("model", type="cnn_gridnet", obs_shape=OBS, action_nvec=NVEC, device="cpu")
 
-    cfg = Config.from_experiment("micro-rts/base_rlFS_expert_masked")
+    cfg = Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert_masked")
     a = PPOTrainer(cfg=cfg); a.device = torch.device("cpu"); a.run_dir = tmp_path
     pol = fresh(); a._attach(pol)
     sum(p.sum() for p in pol.parameters()).backward()

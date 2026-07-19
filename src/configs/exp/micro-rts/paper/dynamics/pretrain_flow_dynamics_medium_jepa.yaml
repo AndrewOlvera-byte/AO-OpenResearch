@@ -1,0 +1,113 @@
+run:
+  name: pretrain_flow_dynamics_medium_jepa_exact
+  seed: 0
+  device: auto
+
+# 103.1M-parameter exact-JEPA world model. Width remains 512 so the complete
+# pretrained event encoder and action-to-state router transfer exactly; scaling
+# comes from 28 dynamics blocks rather than an incompatible 768-wide rewrite.
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 320
+    d_latent: 320
+    downsample: 2
+    depth: 4
+    n_heads: 8
+    max_unit_types: 16
+    max_entities: 128
+    exact_categorical: true
+    max_tick: 2048
+    max_hp: 16
+    max_carried: 32
+    max_eta: 256
+    max_remaining: 256
+    max_resources: 32
+    max_reserved_positions: 64
+    exact_consistency_coef: 0.25
+  dynamics:
+    d_model: 512
+    depth: 28
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 48
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  # The winning deterministic residual/paired objective uses the flow model and
+  # one-step sampler while directly supervising factual and cloned arrivals.
+  objective: causal_paired
+  amp: true
+  steps: 160000
+  batch: 16
+  seq_len: 1
+  num_workers: 8
+
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  freeze_action_encoder: true
+  freeze_action_router: true
+
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 2.0
+  causal_effect_cosine_coef: 0.05
+  causal_effect_norm_coef: 0.02
+  residual_correction_coef: 0.50
+  active_token_boost: 1.0
+  changed_token_boost: 2.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 1.0
+  canonical_grounding_coef: 0.0
+  canonical_changed_boost: 0.0
+
+  paired_batch_fraction: 0.50
+  val_frac: 0.05
+  fixed_val: true
+  fixed_val_seed: 0
+  eval_every: 1000
+  eval_batches: 32
+  probe_flow_steps: 1
+  probe_samples: 128
+
+  # One smooth schedule avoids the restart-induced router/correction drift seen
+  # in earlier residual runs. The 30--40k checkpoint is the first scale gate.
+  warmup_steps: 1000
+  lr_stages:
+    - {end_step: 160000, start_frac: 1.0, end_frac: 0.03}
+  lr_min_frac: 0.03
+  log_every: 100
+  average_train_metrics: true
+
+  tokenizer_ckpt: checkpoints/pretrain_medium_jepa_exact/best.pt
+  action_tokenizer_ckpt: checkpoints/pretrain_action_encoder_medium_jepa_exact/best.pt
+  out: checkpoints/pretrain_flow_dynamics_medium_jepa_exact.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 5
+    monitor: val/causal/unweighted_mse
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_flow_dynamics_medium_jepa_exact
+  tags: [micro-rts, paper, structured-v2, medium-103m, exact-temporal-jepa,
+         causal-paired, residual-flow, frozen-router, pretrained-action,
+         explicit-spatial-routing, deterministic]

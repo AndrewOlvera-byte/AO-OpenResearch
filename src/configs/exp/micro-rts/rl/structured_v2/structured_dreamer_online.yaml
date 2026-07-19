@@ -1,0 +1,184 @@
+# Frozen-world Dreamer on the promoted stable-tail residual flow model.
+#
+# Phase A: learn reward/continue and own/opponent behavior priors from the same
+# structured offline corpus while collecting with the behavior prior.
+# Phase B: copy the prior into the actor and train policy/value with short PMPO
+# imagination. The accepted world model remains frozen for this run: the earlier
+# online adaptation path could regress mechanics, and the promoted checkpoint is
+# already strong enough for short-horizon Dreamer imagination. The guarded hybrid
+# objective remains below for a later, explicitly selected adaptation run.
+#
+# Run:
+#   python src/micro-rts/entrypoints/train_dreamer_rl.py \
+#     --exp micro-rts/rl/structured_v2/structured_dreamer_online
+
+run:
+  name: structured_dreamer_flow_stable_frozen
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: structured_dreamer
+  # No world optimizer is constructed in imagination mode. Keep this value as
+  # the conservative default for a future guarded-hybrid continuation.
+  world_lr: 2.0e-6
+  agent_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 10.0
+
+  tokenizer:                       # must match structured tokenizer checkpoint
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+    mask_width: 79
+
+  dynamics:                        # must match residual trust-region checkpoint
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+  actor_critic:
+    dec_channels: 128
+    summary_hidden: 512
+    critic_hidden: [512, 512]
+    reward_bins: 255
+    critic_bins: 255
+    imagine_horizon: 8             # raise only after 8-step rollout gates pass
+    imagine_flow_steps: 1          # exact query trained by causal pretraining
+    gamma: 0.997
+    lam: 0.95
+    critic_ema: 0.98
+    pmpo_alpha: 0.5                # equal positive/negative advantage pressure
+    prior_kl_coef: 0.3             # Dreamer-4 reverse KL to frozen BC prior
+    entropy_coef: 0.0
+
+  freeze:
+    tokenizer: true
+    action_encoder: true
+    action_router: true
+    dynamics: true
+    actor: false
+    critic: false
+    agent_heads: false
+
+data: {}
+
+training:
+  iters: 5000
+  dreamer:
+    # Actor/value learn from imagination while the promoted WM stays immutable.
+    mode: imagination
+    init_from: checkpoints/pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region_160k_stable_tail/best.pt
+    amp: true
+    buffer_device: cpu
+    num_envs: 16
+    horizon: 64
+    seq_len: 12
+    batch_seqs: 8
+    buffer_capacity: 4096
+    warmup_steps: 1024
+    train_ratio: 0.25
+    imagine_horizon: 8
+    imagine_seeds: 64
+
+    # Phase 2 happens before either policy improvement or WM adaptation. During
+    # this stage collection uses the learned behavior prior rather than a random
+    # actor. At the boundary the actor is copied from the prior exactly once.
+    agent_warmup_updates: 1000
+    world_finetune_after: 1000
+    # The count is only a minimum: do not optimize from imagined rewards until
+    # these phase-2 heads also pass smoothed factual-data health checks.
+    agent_gate:
+      smoothing: 0.05
+      max_reward_mae: 5.0
+      min_continue_acc: 0.90
+    agent_heads:
+      data: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+      seq_len: 8
+      batch_seqs: 8
+      num_workers: 2
+      reward_coef: 1.0
+      continue_coef: 1.0
+      prior_bc_coef: 1.0
+      opponent_bc_coef: 0.5
+      online_coef: 0.25
+
+    # Inactive in imagination mode. This exactly preserves the accepted stable-
+    # tail objective if we later opt into a separate guarded-hybrid continuation.
+    world_update:
+      data: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+      online_coef: 0.25
+      anchor_coef: 1.0
+      anchor_batch: 32
+      paired_fraction: 0.5
+      num_workers: 2
+      factual_coef: 1.0
+      counterfactual_coef: 1.0
+      effect_coef: 2.0
+      effect_cosine_coef: 0.05
+      effect_norm_coef: 0.02
+      residual_correction_coef: 0.5
+      active_token_boost: 1.0
+      changed_token_boost: 2.0
+      change_threshold: 1.0e-3
+      padding_token_weight: 1.0
+      canonical_grounding_coef: 0.0
+      canonical_changed_boost: 0.0
+
+    world_guard:
+      batch: 32
+      paired_batch: 32
+      seed: 0
+      every_updates: 100
+      max_mse_regression: 0.03
+      max_paired_regression: 0.05
+      min_changed_f1_retention: 0.98
+      patience: 2
+
+    bots: [randomBiasedAI, workerRushAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    reward: dense_shaped
+
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 50
+    games: 5
+    envs_per_bot: 2
+    max_steps: 2000
+    bots: [randomBiasedAI, workerRushAI, coacAI]
+    greedy: true
+  checkpoint:
+    every_iters: 100
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: ${run.name}
+  tags: [micro-rts, structured-v2, dreamer, imagination-rl, pmpo,
+         stable-tail-flow, frozen-world-model, behavior-prior]

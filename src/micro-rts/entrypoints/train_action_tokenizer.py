@@ -36,6 +36,7 @@ from models.dreamer_v2 import (  # noqa: E402
     StructuredTokenizer,
     StructuredTokenizerConfig,
     action_tokenizer_ssl_loss,
+    structured_tokenizer_state_dict,
 )
 from trainers.BaseTrainer import BaseTrainer, resolve_device  # noqa: E402
 from trainers.PretrainCheckpointManager import PretrainCheckpointManager  # noqa: E402
@@ -45,7 +46,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--exp",
-        default="micro-rts/pretrain_structured_action_tokenizer_v2",
+        default="micro-rts/tokenizer/structured_v2/pretrain_structured_action_tokenizer_v2",
     )
     p.add_argument("--data", default=None)
     p.add_argument("--steps", type=int, default=None)
@@ -63,19 +64,36 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def _load_state_tokenizer(path, ds, device):
+def _load_state_tokenizer(path, ds, device, stats_path=None):
     ckpt = torch.load(path, map_location="cpu")
     tc = StructuredTokenizerConfig.from_dict(ckpt["tokenizer_cfg"])
     tc.mask_width = 1 + sum(ds.action_nvec[1:])
     tc.legacy_obs_channels = ds.obs_channels
     tokenizer = StructuredTokenizer(ds.grid_hw, tc).to(device)
-    tokenizer.load_state_dict(ckpt["model"])
+    tokenizer.load_state_dict(structured_tokenizer_state_dict(ckpt))
     tokenizer.requires_grad_(False)
     tokenizer.eval()
-    if "latent_mean" not in ckpt or "latent_std" not in ckpt:
-        raise ValueError(
-            f"{path}: structured tokenizer checkpoint lacks latent_mean/std"
-        )
+    stats_ckpt = ckpt
+    if "latent_mean" not in stats_ckpt or "latent_std" not in stats_ckpt:
+        if not stats_path:
+            raise ValueError(
+                f"{path}: structured tokenizer checkpoint lacks latent_mean/std; "
+                "set training.tokenizer_stats_ckpt to a compatible final checkpoint"
+            )
+        stats_ckpt = torch.load(stats_path, map_location="cpu")
+        stats_cfg = StructuredTokenizerConfig.from_dict(stats_ckpt["tokenizer_cfg"])
+        if (stats_cfg.d_latent, stats_cfg.max_entities) != (
+            tc.d_latent,
+            tc.max_entities,
+        ):
+            raise ValueError(
+                f"{stats_path}: latent geometry is incompatible with {path}"
+            )
+        if "latent_mean" not in stats_ckpt or "latent_std" not in stats_ckpt:
+            raise ValueError(f"{stats_path}: checkpoint lacks latent_mean/std")
+        ckpt = dict(ckpt)
+        ckpt["latent_mean"] = stats_ckpt["latent_mean"]
+        ckpt["latent_std"] = stats_ckpt["latent_std"]
     return tokenizer, tc, ckpt
 
 
@@ -117,6 +135,7 @@ def main(argv=None):
         **common_loader,
         num_workers=workers,
         split="train",
+        paired_batch_fraction=tr.get("paired_batch_fraction"),
     )
     val_loader = (
         build_mrts_loader(
@@ -133,7 +152,10 @@ def main(argv=None):
     )
     ds = loader.dataset
     state_tokenizer, tc, state_ckpt = _load_state_tokenizer(
-        tokenizer_ckpt, ds, device
+        tokenizer_ckpt,
+        ds,
+        device,
+        stats_path=tr.get("tokenizer_stats_ckpt"),
     )
     ac = ActionTokenizerConfig.from_dict(mc.get("action_tokenizer"))
     if args.smoke:
@@ -182,6 +204,7 @@ def main(argv=None):
             "grid_hw": ds.grid_hw,
             "action_nvec": ds.action_nvec,
             "state_tokenizer_ckpt": tokenizer_ckpt,
+            "state_tokenizer_stats_ckpt": tr.get("tokenizer_stats_ckpt"),
         },
         default_monitor="val/action_tok/total",
     )

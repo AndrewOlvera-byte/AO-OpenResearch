@@ -1,0 +1,59 @@
+run:
+  name: pretrain_discrete_action_tokenizer_v3
+  seed: 0
+  device: auto
+
+model:
+  type: structured_discrete_action_jepa_v3
+  action_tokenizer:
+    d_model: 512
+    field_dim: 64
+    n_heads: 8
+    inverse_depth: 2
+    mlp_ratio: 4.0
+    dropout: 0.0
+    # Corpus audit: max observed 42; 48 avoids the measured 32-slot overflow.
+    max_action_events: 48
+    max_unit_types: 16
+
+data:
+  # Match the immutable corpus used to train the promoted Matrix A tokenizer.
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  amp: true
+  steps: 100000
+  batch: 32
+  num_workers: 8
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  reconstruction_coef: 1.0
+  inverse_coef: 1.0
+  forward_coef: 1.0
+  counterfactual_coef: 1.0
+  effect_margin_coef: 2.0
+  effect_margin: 1.0
+  alignment_coef: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 16
+  fixed_val_seed: 0
+  warmup_steps: 1000
+  lr_min_frac: 0.05
+  log_every: 100
+  tokenizer_ckpt: checkpoints/discrete_tokenizer_v3_matrix_a_8x8_d4_k512.pt
+  out: checkpoints/discrete_action_tokenizer_v3.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/dajepa/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_discrete_action_tokenizer_v3
+  tags: [micro-rts, discrete-v3, action-jepa, categorical-router, causal-paired]

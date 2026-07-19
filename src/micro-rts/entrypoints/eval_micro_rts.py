@@ -7,14 +7,14 @@ wins / losses / draws, win rate, average game length, and an implied Elo
 
 Usage:
     # default: eval configs/exp/<exp>'s best checkpoint under its ckpt dir
-    python eval_micro_rts.py --exp micro-rts/base_rlFS_expert
+    python eval_micro_rts.py --exp micro-rts/rl/ppo/base_rlFS_expert
 
     # override the checkpoint (path may start at checkpoints/, be an absolute
     # path, or a bare tag like "final" / "step_650444800")
-    python eval_micro_rts.py --exp micro-rts/base_rlFS_expert \
+    python eval_micro_rts.py --exp micro-rts/rl/ppo/base_rlFS_expert \
         --checkpoint checkpoints/base_rlFS_expert/step_650444800.pt
 
-    python eval_micro_rts.py --exp micro-rts/base_rlFS_expert \
+    python eval_micro_rts.py --exp micro-rts/rl/ppo/base_rlFS_expert \
         --bots coacAI workerRushAI lightRushAI --games 50 --sample
 """
 
@@ -116,7 +116,7 @@ def print_report(report, ckpt_path, step):
 # --- entry ---------------------------------------------------------------
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate a MicroRTS policy vs scripted bots")
-    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/base_rlFS_expert")
+    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/rl/ppo/base_rlFS_expert")
     parser.add_argument("--checkpoint", default=None,
                         help="checkpoint path (may start at checkpoints/, be absolute, or a bare tag). Default: best.pt")
     parser.add_argument("--bots", nargs="+", default=None, help="opponent bots (default: curriculum eval_bots)")

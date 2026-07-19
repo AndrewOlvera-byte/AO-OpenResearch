@@ -10,9 +10,13 @@ from models.dreamer_v2 import (
     StructuredDynamicsConfig,
     StructuredTokenizerConfig,
     StructuredWorldModelV2,
+    TemporalJEPAConfig,
+    TemporalJEPATokenizerPretrainer,
     action_tokenizer_ssl_loss,
     dense_actions_to_events,
     structured_reconstruction_loss,
+    structured_temporal_jepa_loss,
+    structured_tokenizer_state_dict,
     validate_structured_state,
 )
 from models.dreamer_v2.dynamics import (
@@ -22,6 +26,7 @@ from models.dreamer_v2.dynamics import (
     structured_flow_loss,
 )
 from entrypoints.migrate_structured_none_actions import main as migrate_none_actions
+from entrypoints.compare_structured_tokenizers import evaluate_tokenizer_batch
 from entrypoints.train_dreamer_dynamics import load_pretrained_action_tokenizer
 from entrypoints.pretrain_common import make_lr_scheduler
 
@@ -52,7 +57,9 @@ def make_state(batch=2, time=3):
     return s, g
 
 
-def tiny_model(action_encoder_type="legacy", **dynamics_overrides):
+def tiny_model(
+    action_encoder_type="legacy", exact_categorical=False, **dynamics_overrides
+):
     tc = StructuredTokenizerConfig(
         d_cell=16,
         d_latent=16,
@@ -63,6 +70,7 @@ def tiny_model(action_encoder_type="legacy", **dynamics_overrides):
         max_entities=8,
         mask_width=MASK_W,
         legacy_obs_channels=6,
+        exact_categorical=exact_categorical,
     )
     dc = StructuredDynamicsConfig(
         d_model=32,
@@ -149,6 +157,82 @@ def test_structured_tokenizer_reconstructs_and_backprops():
     assert torch.isfinite(loss) and "tok/remaining_acc" not in metrics
     loss.backward()
     assert model.tokenizer.compress.weight.grad is not None
+
+
+def test_exact_structured_tokenizer_uses_discrete_fields_and_relative_clock():
+    tc = StructuredTokenizerConfig(
+        d_cell=16,
+        d_latent=16,
+        downsample=2,
+        depth=1,
+        n_heads=4,
+        max_unit_types=8,
+        max_entities=8,
+        mask_width=MASK_W,
+        legacy_obs_channels=6,
+        exact_categorical=True,
+        max_tick=16,
+        max_hp=12,
+        max_carried=32,
+        max_eta=16,
+        max_remaining=16,
+        max_resources=8,
+        max_reserved_positions=16,
+    )
+    tokenizer = TemporalJEPATokenizerPretrainer(
+        (H, W), tc, TemporalJEPAConfig(d_model=32, field_dim=8, n_heads=4)
+    ).tokenizer
+    state, glob = make_state(batch=2, time=2)
+    state[..., 5, 7] = 1
+    state[..., 5, 13] = glob[..., 0]
+    state[..., 5, 14:16] = 5
+    decoded, _ = tokenizer(state, glob)
+    assert "start_lag" in decoded["numeric_classes"]
+    assert decoded["numeric_classes"]["start_lag"].shape[-1] == 18
+    loss, metrics = structured_reconstruction_loss(tokenizer, decoded, state, glob)
+    assert torch.isfinite(loss)
+    assert {
+        "tok/start_lag_acc",
+        "tok/global_tick_acc",
+        "tok/exact_assigned_cell",
+        "tok/mechanics_score",
+    } <= set(metrics)
+    assert metrics["tok/clipped_fraction"] == 0
+    loss.backward()
+    assert tokenizer.numeric_class_heads["start_lag"].weight.grad is not None
+    assert tokenizer.global_class_heads["tick"].weight.grad is not None
+
+
+def test_structured_tokenizer_comparison_reports_exact_and_transition_metrics():
+    model = tiny_model().eval()
+    state, glob = make_state(batch=2, time=1)
+    nxt = state.clone()
+    nxt[..., 5, 5] += 1
+    batch = {
+        "state": state,
+        "globals": glob,
+        "next_state": nxt,
+        "next_globals": glob.clone(),
+        "obs": torch.zeros(2, 1, 6, H, W),
+        "mask": torch.zeros(2, 1, CELLS, MASK_W, dtype=torch.bool),
+        "counterfactual_next_state": nxt.clone(),
+        "counterfactual_next_globals": glob.clone(),
+        "counterfactual_valid": torch.tensor([[True], [False]]),
+    }
+    metrics = evaluate_tokenizer_batch(model.tokenizer, batch)
+    assert {
+        "reconstruction",
+        "exact_cell",
+        "exact_frame",
+        "exact_globals",
+        "exact_roundtrip",
+        "exact_raster",
+        "exact_mask_cell",
+        "exact_start_tick",
+        "transition_delta_mse",
+        "paired_nonzero_fraction",
+    } <= set(metrics)
+    assert all(torch.isfinite(value) for value in metrics.values())
 
 
 def test_learned_representation_is_invariant_to_raw_unit_ids():
@@ -259,6 +343,166 @@ def test_action_tokenizer_dual_ssl_objective_backprops_through_encoder():
     assert action_model.forward_head[0].weight.grad is not None
     assert action_model.inverse_queries.grad is not None
     assert action_model.event_heads["action_type"].weight.grad is not None
+
+
+def test_temporal_jepa_tokenizer_backprops_and_updates_ema_target():
+    torch.manual_seed(0)
+    tc = StructuredTokenizerConfig(
+        d_cell=16,
+        d_latent=16,
+        downsample=2,
+        depth=1,
+        n_heads=4,
+        max_unit_types=8,
+        max_entities=8,
+        mask_width=MASK_W,
+        legacy_obs_channels=6,
+    )
+    jc = TemporalJEPAConfig(
+        d_model=32,
+        field_dim=8,
+        n_heads=4,
+        max_action_events=8,
+        max_unit_types=8,
+    )
+    model = TemporalJEPATokenizerPretrainer((H, W), tc, jc)
+    state, glob = make_state(batch=2, time=2)
+    nxt = state.clone()
+    nxt[..., 5, 5] += 1
+    cf_nxt = state.clone()
+    cf_nxt[..., 5, 5] += 2
+    action = torch.zeros(2, 2, CELLS, 7, dtype=torch.long)
+    opponent = torch.zeros_like(action)
+    action[..., 5, 0] = 1
+    action[..., 5, 1] = 1
+    cf_action = action.clone()
+    cf_action[..., 5, 1] = 2
+    batch = {
+        "state": state,
+        "globals": glob,
+        "next_state": nxt,
+        "next_globals": glob.clone(),
+        "action": action,
+        "opponent_action": opponent,
+        "obs": torch.zeros(2, 2, 6, H, W),
+        "mask": torch.zeros(2, 2, CELLS, MASK_W, dtype=torch.bool),
+        "counterfactual_action": cf_action,
+        "counterfactual_opponent_action": opponent.clone(),
+        "counterfactual_next_state": cf_nxt,
+        "counterfactual_next_globals": glob.clone(),
+        "counterfactual_valid": torch.tensor(
+            [[True, False], [True, True]], dtype=torch.bool
+        ),
+    }
+    loss, metrics = structured_temporal_jepa_loss(model, batch)
+    assert torch.isfinite(loss)
+    assert {
+        "tok/reconstruction",
+        "tok/jepa_factual",
+        "tok/jepa_counterfactual",
+        "tok/jepa_effect",
+        "tok/jepa_effect_cosine",
+    } <= set(metrics)
+    loss.backward()
+    assert model.tokenizer.compress.weight.grad is not None
+    assert model.predictor.action_encoder.project[0].weight.grad is not None
+    assert all(parameter.grad is None for parameter in model.target_tokenizer.parameters())
+
+    target_before = model.target_tokenizer.compress.weight.detach().clone()
+    with torch.no_grad():
+        model.tokenizer.compress.weight.add_(1.0)
+    model.update_target(decay=0.5)
+    torch.testing.assert_close(
+        model.target_tokenizer.compress.weight,
+        target_before + 0.5,
+    )
+
+
+def test_exact_temporal_jepa_grounds_factual_and_counterfactual_predictions():
+    torch.manual_seed(0)
+    tc = StructuredTokenizerConfig(
+        d_cell=16,
+        d_latent=16,
+        downsample=2,
+        depth=1,
+        n_heads=4,
+        max_unit_types=8,
+        max_entities=8,
+        mask_width=MASK_W,
+        legacy_obs_channels=6,
+        exact_categorical=True,
+        max_tick=16,
+        max_hp=12,
+        max_carried=32,
+        max_eta=16,
+        max_remaining=16,
+        max_resources=8,
+        max_reserved_positions=16,
+    )
+    jc = TemporalJEPAConfig(
+        d_model=32,
+        field_dim=8,
+        n_heads=4,
+        max_action_events=8,
+        max_unit_types=8,
+        raw_prediction=True,
+    )
+    model = TemporalJEPATokenizerPretrainer((H, W), tc, jc)
+    state, glob = make_state(batch=2, time=1)
+    nxt = state.clone()
+    nxt[..., 5, 5] += 1
+    cf_nxt = state.clone()
+    cf_nxt[..., 5, 5] += 2
+    action = torch.zeros(2, 1, CELLS, 7, dtype=torch.long)
+    opponent = torch.zeros_like(action)
+    action[..., 5, 0] = 1
+    action[..., 5, 1] = 1
+    cf_action = action.clone()
+    cf_action[..., 5, 1] = 2
+    batch = {
+        "state": state,
+        "globals": glob,
+        "next_state": nxt,
+        "next_globals": glob.clone(),
+        "action": action,
+        "opponent_action": opponent,
+        "counterfactual_action": cf_action,
+        "counterfactual_opponent_action": opponent.clone(),
+        "counterfactual_next_state": cf_nxt,
+        "counterfactual_next_globals": glob.clone(),
+        "counterfactual_valid": torch.ones(2, 1, dtype=torch.bool),
+    }
+    loss, metrics = structured_temporal_jepa_loss(
+        model,
+        batch,
+        factual_grounding_coef=0.25,
+        counterfactual_grounding_coef=0.25,
+    )
+    assert torch.isfinite(loss)
+    assert {
+        "tok/jepa_factual_grounding",
+        "tok/jepa_counterfactual_grounding",
+        "tok/jepa_factual_exact_occupied_cell",
+        "tok/jepa_counterfactual_exact_assigned_cell",
+    } <= set(metrics)
+    loss.backward()
+    assert model.predictor.forward_head[-1].weight.grad is not None
+    assert model.tokenizer.numeric_class_heads["hp"].weight.grad is not None
+
+
+def test_structured_tokenizer_checkpoint_extraction_supports_base_and_jepa():
+    base = {"weight": torch.randn(2, 3)}
+    assert structured_tokenizer_state_dict({"model": base}) == base
+    wrapped = {
+        "model": {
+            "tokenizer.weight": base["weight"],
+            "target_tokenizer.weight": torch.zeros_like(base["weight"]),
+            "predictor.weight": torch.ones(1),
+        }
+    }
+    extracted = structured_tokenizer_state_dict(wrapped)
+    assert set(extracted) == {"weight"}
+    torch.testing.assert_close(extracted["weight"], base["weight"])
 
 
 def test_action_tokenizer_checkpoint_loads_encoder_and_slot_positions(tmp_path):
@@ -454,7 +698,7 @@ def test_dreamer4_structured_loss_uses_paper_objectives():
 
 def test_causal_paired_loss_trains_deployed_one_step_query():
     torch.manual_seed(0)
-    model = tiny_model(residual_prediction=True)
+    model = tiny_model(residual_prediction=True, exact_categorical=True)
     model.dynamics.cfg.initial_noise = "zero"
     state, glob = make_state()
     nxt = state.clone()
@@ -493,6 +737,13 @@ def test_causal_paired_loss_trains_deployed_one_step_query():
         effect_norm_coef=0.1,
         canonical_grounding_coef=0.1,
         canonical_changed_boost=4.0,
+        canonical_effect_margin_coef=0.1,
+        canonical_effect_margin=1.0,
+        rollout_grounding_coef=0.1,
+        rollout_latent_coef=0.25,
+        rollout_horizon=3,
+        rollout_discount=0.8,
+        rollout_batch_fraction=0.5,
         residual_correction_coef=0.5,
     )
     assert torch.isfinite(loss)
@@ -507,14 +758,20 @@ def test_causal_paired_loss_trains_deployed_one_step_query():
             "causal/effect_cosine_loss",
             "causal/effect_norm_loss",
             "causal/grounding_factual",
+            "causal/categorical_effect_margin",
             "causal/correction_regularizer",
             "grounding/factual_present_acc",
+            "grounding/factual_dynamics_score",
+            "rollout/grounding",
+            "rollout/latent",
             "causal/valid_token_fraction",
         )
     ) <= set(metrics)
     # Eight entity slots are allocated, but only the two occupied slots count.
     assert metrics["causal/valid_token_fraction"] < 1.0
     assert metrics["causal/effect_geometry_rows"] == 3
+    assert metrics["causal/categorical_effect_fields"] > 0
+    assert metrics["rollout/steps"] == 2
     loss.backward()
     assert model.dynamics.flow_x_head.weight.grad is not None
     assert model.dynamics.shortcut_skip_head.weight.grad is None
@@ -595,6 +852,14 @@ def test_hdf5_v4_structured_roundtrip(tmp_path):
     assert action_item["counterfactual_next_state"].shape == (2, CELLS, 16)
     assert action_item["counterfactual_valid"].dtype == torch.bool
     action_tok.close()
+    tokenizer_jepa = MRTSSequenceDataset(
+        path, seq_len=2, task="structured_tokenizer_jepa"
+    )
+    jepa_item = tokenizer_jepa[0]
+    assert jepa_item["obs"].shape == (2, 6, H, W)
+    assert jepa_item["action"].shape == (2, CELLS, 7)
+    assert jepa_item["counterfactual_valid"].dtype == torch.bool
+    tokenizer_jepa.close()
     balanced = build_mrts_loader(
         path,
         task="structured_dynamics_paired",

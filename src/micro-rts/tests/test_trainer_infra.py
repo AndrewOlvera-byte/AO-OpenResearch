@@ -14,7 +14,7 @@ OBS = (27, 16, 16)
 
 
 def _trainer(tmp_path):
-    cfg = Config.from_experiment("micro-rts/base_rlFS_expert")
+    cfg = Config.from_experiment("micro-rts/rl/ppo/base_rlFS_expert")
     cfg.run["ckpt_dir"] = str(tmp_path)
     t = BaseTrainer(cfg, device="cpu")
     return t

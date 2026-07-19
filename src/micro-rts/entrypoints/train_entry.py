@@ -1,14 +1,14 @@
 """Entrypoint: build a PPO run from an experiment config and train (or smoke-test).
 
 Usage:
-    python train_entry.py --exp micro-rts/base_rlFS_expert
-    python train_entry.py --exp micro-rts/base_rlFS_expert --no-wandb
-    python train_entry.py --exp micro-rts/base_rlFS_expert --test
-    python train_entry.py --exp micro-rts/base_rlFS_expert \
+    python train_entry.py --exp micro-rts/rl/ppo/base_rlFS_expert
+    python train_entry.py --exp micro-rts/rl/ppo/base_rlFS_expert --no-wandb
+    python train_entry.py --exp micro-rts/rl/ppo/base_rlFS_expert --test
+    python train_entry.py --exp micro-rts/rl/ppo/base_rlFS_expert \
         --set training.ppo.lr=1e-3 --set training.iters=500 --set run.seed=7
 
 Flags:
-    --exp        experiment name under configs/exp (required), e.g. micro-rts/base_rlFS_expert
+    --exp        experiment name under configs/exp (required), e.g. micro-rts/rl/ppo/base_rlFS_expert
     --test       single-batch smoke test (no W&B, no checkpoint)
     --no-wandb   disable remote W&B logging (log() becomes a no-op)
     --device     override device (cpu/cuda/auto)
@@ -65,7 +65,7 @@ def build_trainer(args) -> PPOTrainer:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MicroRTS PPO trainer")
-    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/base_rlFS_expert")
+    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/rl/ppo/base_rlFS_expert")
     parser.add_argument("--test", action="store_true", help="single-batch smoke test (no W&B / no save)")
     parser.add_argument("--no-wandb", action="store_true", help="disable remote W&B logging")
     parser.add_argument("--wandb-key", default=None, metavar="KEY",

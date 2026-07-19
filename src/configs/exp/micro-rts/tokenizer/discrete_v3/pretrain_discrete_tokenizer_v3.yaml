@@ -1,0 +1,65 @@
+run:
+  name: pretrain_discrete_tokenizer_v3_matrix_a_8x8_d4_k512
+  seed: 0
+  device: auto
+
+model:
+  type: structured_discrete_v3
+  tokenizer:
+    # Matrix A: 8x8 grouped spatial topology, deep 4x512 product code.
+    d_model: 256
+    depth: 2
+    n_heads: 4
+    mlp_ratio: 4.0
+    dropout: 0.0
+    # 64 spatial + 4 global semantic slots, each with four 512-way codes.
+    # This is 272 base code tokens per frame.  The full-resolution 256x2
+    # capacity control is a sibling config; promotion is based on exactness.
+    spatial_downsample: 2
+    codebook_size: 512
+    codebook_depth: 4
+    n_global_tokens: 4
+    max_unit_types: 16
+    max_tick: 4096
+    max_hp: 64
+    max_carried: 64
+    max_eta: 512
+    max_remaining: 512
+    max_resources: 256
+    max_reserved_positions: 256
+
+data:
+  # Pin the comparison matrix to one immutable corpus.
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  amp: true
+  steps: 100000
+  batch: 32
+  num_workers: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  usage_coef: 0.01
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 16
+  fixed_val_seed: 0
+  warmup_steps: 1000
+  lr_min_frac: 0.05
+  log_every: 100
+  out: checkpoints/discrete_tokenizer_v3_matrix_a_8x8_d4_k512.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/dtok/exact_roundtrip
+    mode: max
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_discrete_tokenizer_v3_matrix_a_8x8_d4_k512
+  tags: [micro-rts, discrete-v3, tokenizer, product-codes, categorical,
+         matrix-a, spatial-8x8, depth-4, vocab-512]

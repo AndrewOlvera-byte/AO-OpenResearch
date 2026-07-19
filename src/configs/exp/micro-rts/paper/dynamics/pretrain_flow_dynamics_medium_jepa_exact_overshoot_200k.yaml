@@ -1,0 +1,134 @@
+run:
+  name: pretrain_flow_dynamics_medium_jepa_exact_overshoot_200k
+  seed: 0
+  device: auto
+
+# Best-practice exact-engine continuation of the 159k medium model.  The frozen
+# exact-JEPA tokenizer remains the semantic interface; dynamics is now optimized
+# through its categorical decoder and under short closed-loop rollouts.
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 320
+    d_latent: 320
+    downsample: 2
+    depth: 4
+    n_heads: 8
+    max_unit_types: 16
+    max_entities: 128
+    exact_categorical: true
+    max_tick: 2048
+    max_hp: 16
+    max_carried: 32
+    max_eta: 256
+    max_remaining: 256
+    max_resources: 32
+    max_reserved_positions: 64
+    exact_consistency_coef: 0.25
+  dynamics:
+    d_model: 512
+    depth: 28
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 48
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  objective: causal_paired
+  amp: true
+  steps: 200000
+  # Four contiguous transitions preserve the old effective one-step batch of
+  # 16 while supplying real short trajectories for observation overshooting.
+  batch: 4
+  seq_len: 4
+  num_workers: 8
+
+  # Continue the strong 159k transition model with a fresh conservative
+  # optimizer.  The checkpoint already contains the pretrained frozen action
+  # encoder/router, so a separate action-tokenizer load is neither needed nor
+  # allowed on this weight-only continuation path.
+  init_from: checkpoints/pretrain_flow_dynamics_medium_jepa_exact/best.pt
+  tokenizer_ckpt: checkpoints/pretrain_medium_jepa_exact/best.pt
+  lr: 3.0e-6
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  freeze_action_encoder: true
+  freeze_action_router: true
+
+  # Preserve the successful continuous geometry and residual trust region.
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 2.0
+  causal_effect_cosine_coef: 0.05
+  causal_effect_norm_coef: 0.02
+  residual_correction_coef: 0.50
+  active_token_boost: 1.0
+  changed_token_boost: 2.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 1.0
+
+  # Direct categorical next-state likelihood through the frozen exact decoder.
+  # The implementation uses 1 + boost on changed cells, so 7 means an 8x total
+  # cell weight matching exact-JEPA tokenizer pretraining.
+  canonical_grounding_coef: 0.10
+  canonical_changed_boost: 7.0
+  canonical_effect_margin_coef: 0.10
+  canonical_effect_margin: 1.0
+
+  # Closed-loop observation/latent overshooting.  Two of four trajectory rows
+  # are recursively rolled through the deployed tau=0,d=1 query to bound memory.
+  # The production-shape CUDA smoke measured an initial four-step categorical
+  # loss around 54 versus 14 one-step.  A 0.02 coefficient keeps overshooting
+  # material without allowing early off-manifold rollouts to dominate updates.
+  rollout_grounding_coef: 0.02
+  rollout_latent_coef: 0.25
+  rollout_horizon: 4
+  rollout_discount: 0.8
+  rollout_batch_fraction: 0.50
+
+  paired_batch_fraction: 0.50
+  val_frac: 0.05
+  fixed_val: true
+  fixed_val_seed: 0
+  eval_every: 1000
+  eval_batches: 32
+  probe_flow_steps: 1
+  probe_samples: 128
+
+  warmup_steps: 1000
+  lr_stages:
+    - {end_step: 200000, start_frac: 1.0, end_frac: 0.05}
+  lr_min_frac: 0.05
+  log_every: 100
+  average_train_metrics: true
+
+  out: checkpoints/pretrain_flow_dynamics_medium_jepa_exact_overshoot_200k.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 5
+    monitor: val/grounding/factual_dynamics_score
+    mode: max
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_flow_dynamics_medium_jepa_exact_overshoot_200k
+  tags: [micro-rts, paper, structured-v2, medium-103m, exact-temporal-jepa,
+         causal-paired, categorical-grounding, categorical-effect-margin,
+         observation-overshooting, latent-overshooting, frozen-router,
+         deterministic, 200k]

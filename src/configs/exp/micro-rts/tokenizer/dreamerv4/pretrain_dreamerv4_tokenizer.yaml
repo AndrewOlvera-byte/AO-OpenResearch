@@ -1,0 +1,118 @@
+# DreamerV4 Phase-1 TOKENIZER pretraining on offline MicroRTS rollouts.
+#
+# Trains ONLY the GridNet grid autoencoder (encoder/decoder + predicted
+# action-mask head) to reconstruct the 27x16x16 obs and BCE-predict the per-cell
+# engine mask. Everything else (world model, actor/critic) is built but never
+# touched — see `train_dreamer_tokenizer.py`. The checkpoint this run writes is
+# the *frozen tokenizer* that `train_dreamer_dynamics` (and then the RL config)
+# load. `train_dreamer_dynamics` builds its model from its OWN --exp and loads only
+# the `tokenizer.*` weights (strict=False), so the `model.tokenizer` block here MUST
+# stay byte-for-byte identical to pretrain_dreamerv4_dynamics.yaml's (and whatever
+# RL config consumes the world model) — otherwise the frozen weights won't fit.
+#
+# This config is SELF-CONTAINED: `train_dreamer_tokenizer.py` reads the model arch
+# (`model:`), the training-loop knobs (`training:`), and the dataset (`data.path`)
+# all from here. The tokenizer Adam LR is `model.world_lr`; grad clip is
+# `model.grad_clip`. CLI flags are optional OVERRIDES only — so the whole run is:
+#
+#   python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
+#       --exp micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer
+#
+# Override anything ad hoc via typed flags or `--set` (dotted paths), e.g.:
+#   ... --exp micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer --batch 128 --no-wandb
+#   ... --exp micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer --set training.steps=80000
+#
+# Dataset tokdyn_pretrain_v1 ~= 1.02M frames / 8064 trajectories, so at
+# seq_len=16 there are ~0.9M windows => ~14k steps/epoch at batch=64. The first
+# 40k-step run converged by ~5k (recon 2.3e-4), so 25k steps is generous even
+# with the added latent-noise augmentation. Watch `tok/recon` / `val/recon`
+# (MSE, fall fast then plateau low), `tok/mask_bce` (well below ln(2)=0.69),
+# and `tok/z_rms` — with `training.latent_noise` the encoder must keep its
+# latents spread relative to the noise floor, so the RMS should stabilize
+# instead of collapsing (run 1 drifted 0.4 -> 0.12 with no anchor). At the end
+# the run measures the latent RMS and stores it in the checkpoint as
+# `latent_scale`; the dynamics phase normalizes its flow objective with it.
+#
+# Fast CPU sanity check (2 steps, no workers):
+#   python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
+#       --exp micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer --smoke
+
+run:
+  name: pretrain_dreamerv4_tokenizer
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 3.0e-4          # tokenizer-only Adam LR (autoencoder phase — hotter
+                            # than base's 1e-4 world-model LR; no RL instability here)
+  actor_lr: 3.0e-5          # unused this phase (actor/critic never stepped)
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0           # observed norms are <2 in steady state; 1000 was inert
+  detach_latents: true      # irrelevant to tokenizer_loss (it only touches the
+                            # tokenizer), kept for parity with base_dreamerv4
+  tokenizer:                # <<< MUST MATCH the dynamics + RL configs EXACTLY >>>
+    enc_channels: 96        # ~0.6M-param CNN autoencoder — 2x base's trunk but still
+    d_latent: 32            # ~80x smaller than the 50M dynamics transformer. A modest
+    tanh_bottleneck: true   # 16-token x 32-dim latent keeps the flow-matching target
+                            # simple while we get the dynamics formula right.
+  dynamics:                 # built but never stepped here (world_model frozen). Sized
+    d_model: 512            # to ~47.6M params ("50M-ish") so the checkpoint's saved
+    depth: 10               # model_cfg matches pretrain_dreamerv4_dynamics.yaml.
+    n_heads: 8              # 512 / 8 = 64 dims/head
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:                   # only the tokenizer trains this phase regardless; these
+    tokenizer: false        # switches matter to the RL trainer, not this entrypoint
+    world_model: true
+    actor: true
+    critic: true
+
+data:
+  # Dataset glob; newest match (timestamped names sort by time) is used. Override
+  # with --data or `--set data.path=...`.
+  path: /data/micro-rts/tokdyn_pretrain_v1__*.h5
+
+# The authoritative training-loop config (read by train_dreamer_tokenizer.py).
+training:
+  steps: 25000
+  batch: 64
+  seq_len: 16
+  num_workers: 8
+  recon_coef: 1.0
+  mask_coef: 1.0
+  latent_noise: 0.1         # std of Gaussian noise on z before decoding: makes the
+                            # decoder robust to imagined-latent error and anchors
+                            # the latent scale (see header)
+  warmup_steps: 500         # linear LR warmup, then cosine decay to lr_min_frac
+  lr_min_frac: 0.1
+  val_frac: 0.05            # trajectory-level held-out split
+  eval_every: 2000          # val recon/mask_bce cadence (logged as val/*)
+  eval_batches: 8
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_tokenizer.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, tokenizer, phase1]

@@ -775,6 +775,120 @@ def _weighted_token_mse(prediction, target, weights):
     return (per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
 
+def _categorical_paired_effect_margin(
+    tokenizer: StructuredTokenizer,
+    factual_decoded: dict,
+    counterfactual_decoded: dict,
+    factual_state: torch.Tensor,
+    factual_globals: torch.Tensor,
+    counterfactual_state: torch.Tensor,
+    counterfactual_globals: torch.Tensor,
+    *,
+    margin: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Require paired branches to prefer their own exact engine categories.
+
+    Continuous effect geometry can point in the correct direction while both
+    branches remain on the same side of a decoder boundary.  This field-wise
+    log-probability margin is evaluated only where the cloned engine outcomes
+    differ, with the same occupancy/assignment semantics as reconstruction.
+    """
+    if (
+        "numeric_classes" not in factual_decoded
+        or "global_classes" not in factual_decoded
+    ):
+        raise ValueError(
+            "categorical paired-effect margin requires an exact-categorical tokenizer"
+        )
+
+    losses = []
+    effect_count = factual_state.new_zeros((), dtype=torch.float)
+    factual_occupied = factual_state[..., 1].bool()
+    counterfactual_occupied = counterfactual_state[..., 1].bool()
+    factual_assigned = factual_state[..., 7].bool()
+    counterfactual_assigned = counterfactual_state[..., 7].bool()
+
+    def add_margin(
+        factual_logits,
+        counterfactual_logits,
+        factual_target,
+        cf_target,
+        use,
+    ):
+        nonlocal effect_count
+        effect = use & (factual_target != cf_target)
+        if not effect.any():
+            return
+        factual_logp = factual_logits.float().log_softmax(-1)
+        cf_logp = counterfactual_logits.float().log_softmax(-1)
+        yf, yc = factual_target[..., None], cf_target[..., None]
+        factual_preference = (
+            factual_logp.gather(-1, yf).squeeze(-1)
+            - factual_logp.gather(-1, yc).squeeze(-1)
+        )
+        cf_preference = (
+            cf_logp.gather(-1, yc).squeeze(-1)
+            - cf_logp.gather(-1, yf).squeeze(-1)
+        )
+        losses.append(F.relu(float(margin) - factual_preference[effect]).mean())
+        losses.append(F.relu(float(margin) - cf_preference[effect]).mean())
+        effect_count = effect_count + effect.sum()
+
+    for name, (index, _size, shift) in tokenizer.categorical.items():
+        factual_logits = factual_decoded[name]
+        cf_logits = counterfactual_decoded[name]
+        yf = (factual_state[..., index] + shift).clamp(
+            0, factual_logits.shape[-1] - 1
+        ).long()
+        yc = (counterfactual_state[..., index] + shift).clamp(
+            0, cf_logits.shape[-1] - 1
+        ).long()
+        if name in ("owner", "unit_type"):
+            use = factual_occupied & counterfactual_occupied
+        elif name in ("action_type", "direction", "produced_type"):
+            use = factual_assigned & counterfactual_assigned
+        else:
+            use = torch.ones_like(factual_occupied)
+        add_margin(factual_logits, cf_logits, yf, yc, use)
+
+    factual_numeric = tokenizer._exact_numeric_values(
+        factual_state, factual_globals
+    )
+    cf_numeric = tokenizer._exact_numeric_values(
+        counterfactual_state, counterfactual_globals
+    )
+    for name, (_index, size, shift, _scale) in tokenizer.numeric_specs.items():
+        yf = (factual_numeric[name] + shift).clamp(0, size - 1).long()
+        yc = (cf_numeric[name] + shift).clamp(0, size - 1).long()
+        use = (
+            factual_occupied & counterfactual_occupied
+            if name in ("hp", "carried")
+            else factual_assigned & counterfactual_assigned
+        )
+        add_margin(
+            factual_decoded["numeric_classes"][name],
+            counterfactual_decoded["numeric_classes"][name],
+            yf,
+            yc,
+            use,
+        )
+
+    for name, (index, size, shift, _scale) in tokenizer.global_specs.items():
+        yf = (factual_globals[..., index] + shift).clamp(0, size - 1).long()
+        yc = (counterfactual_globals[..., index] + shift).clamp(0, size - 1).long()
+        add_margin(
+            factual_decoded["global_classes"][name],
+            counterfactual_decoded["global_classes"][name],
+            yf,
+            yc,
+            torch.ones_like(yf, dtype=torch.bool),
+        )
+
+    if not losses:
+        return factual_decoded["present"].new_zeros(()), effect_count
+    return torch.stack(losses).mean(), effect_count
+
+
 def structured_causal_paired_loss(
     model: StructuredWorldModelV2,
     batch: dict,
@@ -790,6 +904,13 @@ def structured_causal_paired_loss(
     effect_norm_coef: float = 0.0,
     canonical_grounding_coef: float = 0.0,
     canonical_changed_boost: float = 0.0,
+    canonical_effect_margin_coef: float = 0.0,
+    canonical_effect_margin: float = 1.0,
+    rollout_grounding_coef: float = 0.0,
+    rollout_latent_coef: float = 0.0,
+    rollout_horizon: int = 1,
+    rollout_discount: float = 1.0,
+    rollout_batch_fraction: float = 1.0,
     residual_correction_coef: float = 0.0,
 ):
     """Direct one-step dynamics with paired counterfactual effect alignment.
@@ -808,6 +929,16 @@ def structured_causal_paired_loss(
         raise ValueError(
             "residual_correction_coef requires residual_prediction=true"
         )
+    if canonical_effect_margin_coef < 0.0:
+        raise ValueError("canonical_effect_margin_coef must be non-negative")
+    if rollout_grounding_coef < 0.0 or rollout_latent_coef < 0.0:
+        raise ValueError("rollout coefficients must be non-negative")
+    if rollout_horizon < 1:
+        raise ValueError("rollout_horizon must be positive")
+    if not 0.0 < rollout_batch_fraction <= 1.0:
+        raise ValueError("rollout_batch_fraction must be in (0, 1]")
+    if not 0.0 < rollout_discount <= 1.0:
+        raise ValueError("rollout_discount must be in (0, 1]")
     required = (
         "counterfactual_action",
         "counterfactual_opponent_action",
@@ -822,8 +953,15 @@ def structured_causal_paired_loss(
             f"missing {missing}"
         )
 
-    state = batch["state"].reshape(-1, *batch["state"].shape[-2:])
-    glob = batch["globals"].reshape(-1, batch["globals"].shape[-1])
+    state_sequence = batch["state"]
+    global_sequence = batch["globals"]
+    next_state_sequence = batch["next_state"]
+    next_global_sequence = batch["next_globals"]
+    action_sequence = batch["action"]
+    opponent_sequence = batch["opponent_action"]
+    sequence_batch, sequence_length = state_sequence.shape[:2]
+    state = state_sequence.reshape(-1, *state_sequence.shape[-2:])
+    glob = global_sequence.reshape(-1, global_sequence.shape[-1])
     nxt = batch["next_state"].reshape(-1, *batch["next_state"].shape[-2:])
     nglob = batch["next_globals"].reshape(-1, batch["next_globals"].shape[-1])
     action = batch["action"].reshape(-1, *batch["action"].shape[-2:])
@@ -1001,8 +1139,12 @@ def structured_causal_paired_loss(
 
     grounding_factual = zero
     grounding_counterfactual = zero
+    categorical_effect_margin = zero
+    categorical_effect_fields = zero
     grounding_metrics = {}
-    if canonical_grounding_coef > 0.0:
+    factual_decoded = None
+    cf_decoded = None
+    if canonical_grounding_coef > 0.0 or canonical_effect_margin_coef > 0.0:
         # The frozen decoder is differentiable with respect to predicted latents.
         # Canonical field losses prevent a small latent error from crossing a
         # categorical unit/assignment boundary unnoticed.
@@ -1012,20 +1154,40 @@ def structured_causal_paired_loss(
         factual_target[..., 2] = -1
         factual_changed = (factual_changed != factual_target).any(-1)
         factual_cell_weights = 1.0 + float(canonical_changed_boost) * factual_changed
-        grounding_factual, factual_ground_metrics = structured_reconstruction_loss(
-            model.tokenizer,
-            model.tokenizer.decode(wm.denormalize(factual_pred)),
-            nxt,
-            nglob,
-            cell_weights=factual_cell_weights,
-        )
-        grounding_metrics.update(
-            {
-                f"grounding/factual_{key.removeprefix('tok/')}": value
-                for key, value in factual_ground_metrics.items()
-                if key in ("tok/present_acc", "tok/unit_type_acc", "tok/total")
-            }
-        )
+        factual_decoded = model.tokenizer.decode(wm.denormalize(factual_pred))
+        if canonical_grounding_coef > 0.0:
+            grounding_factual, factual_ground_metrics = structured_reconstruction_loss(
+                model.tokenizer,
+                factual_decoded,
+                nxt,
+                nglob,
+                cell_weights=factual_cell_weights,
+            )
+            selected_metrics = (
+                "present_acc",
+                "unit_type_acc",
+                "exact_cell",
+                "exact_frame",
+                "exact_globals",
+                "exact_roundtrip",
+                "exact_occupied_cell",
+                "exact_assigned_cell",
+                "total",
+            )
+            grounding_metrics.update(
+                {
+                    f"grounding/factual_{name}": factual_ground_metrics[f"tok/{name}"]
+                    for name in selected_metrics
+                }
+            )
+            grounding_metrics["grounding/factual_dynamics_score"] = torch.stack(
+                (
+                    factual_ground_metrics["tok/exact_occupied_cell"],
+                    factual_ground_metrics["tok/exact_assigned_cell"],
+                    factual_ground_metrics["tok/exact_globals"],
+                    factual_ground_metrics["tok/exact_frame"],
+                )
+            ).mean()
         if cf_pred is not None:
             cf_before = state[idx].clone()
             cf_target = cf_state.clone()
@@ -1033,23 +1195,156 @@ def structured_causal_paired_loss(
             cf_target[..., 2] = -1
             cf_changed = (cf_before != cf_target).any(-1)
             cf_cell_weights = 1.0 + float(canonical_changed_boost) * cf_changed
-            grounding_counterfactual, cf_ground_metrics = (
-                structured_reconstruction_loss(
-                    model.tokenizer,
-                    model.tokenizer.decode(wm.denormalize(cf_pred)),
-                    cf_state,
-                    cf_glob,
-                    cell_weights=cf_cell_weights,
+            cf_decoded = model.tokenizer.decode(wm.denormalize(cf_pred))
+            if canonical_grounding_coef > 0.0:
+                grounding_counterfactual, cf_ground_metrics = (
+                    structured_reconstruction_loss(
+                        model.tokenizer,
+                        cf_decoded,
+                        cf_state,
+                        cf_glob,
+                        cell_weights=cf_cell_weights,
+                    )
                 )
-            )
-            grounding_metrics.update(
-                {
-                    f"grounding/counterfactual_{key.removeprefix('tok/')}": value
-                    for key, value in cf_ground_metrics.items()
-                    if key in ("tok/present_acc", "tok/unit_type_acc", "tok/total")
-                }
-            )
+                grounding_metrics.update(
+                    {
+                        f"grounding/counterfactual_{name}": cf_ground_metrics[
+                            f"tok/{name}"
+                        ]
+                        for name in selected_metrics
+                    }
+                )
+            if canonical_effect_margin_coef > 0.0:
+                categorical_effect_margin, categorical_effect_fields = (
+                    _categorical_paired_effect_margin(
+                        model.tokenizer,
+                        {
+                            key: (
+                                {
+                                    subkey: value[idx]
+                                    for subkey, value in values.items()
+                                }
+                                if isinstance(values, dict)
+                                else values[idx]
+                            )
+                            for key, values in factual_decoded.items()
+                        },
+                        cf_decoded,
+                        nxt[idx],
+                        nglob[idx],
+                        cf_state,
+                        cf_glob,
+                        margin=canonical_effect_margin,
+                    )
+                )
     grounding = grounding_factual + grounding_counterfactual
+
+    # Observation overshooting: start from the model's own first prediction and
+    # repeatedly apply the deployed tau=0,d=1 transition.  The recorded actions
+    # are routed against the model-decoded departure state, matching inference.
+    rollout_grounding = zero
+    rollout_latent = zero
+    rollout_exact_cell = zero
+    rollout_exact_frame = zero
+    rollout_exact_globals = zero
+    rollout_steps = 0
+    effective_horizon = min(int(rollout_horizon), int(sequence_length))
+    if (
+        effective_horizon > 1
+        and (rollout_grounding_coef > 0.0 or rollout_latent_coef > 0.0)
+    ):
+        rows = max(1, int(round(sequence_batch * float(rollout_batch_fraction))))
+        row_index = torch.arange(rows, device=state.device)
+        factual_sequence = factual_pred.reshape(
+            sequence_batch, sequence_length, *factual_pred.shape[-2:]
+        )
+        target_z_sequence = z1.reshape(
+            sequence_batch, sequence_length, *z1.shape[-2:]
+        )
+        rollout_z = factual_sequence[row_index, 0]
+        rollout_weights_sum = zero
+        rollout_correction = []
+        for time_index in range(1, effective_horizon):
+            with torch.no_grad():
+                rollout_state, _ = model.tokenizer.discretize(
+                    model.tokenizer.decode(wm.denormalize(rollout_z))
+                )
+            events_t, valid_t, _ = model.action_events(
+                rollout_state,
+                action_sequence[row_index, time_index],
+                opponent_sequence[row_index, time_index],
+            )
+            noise_t = wm.initial_noise_like(rollout_z)
+            zeros_t = torch.zeros(rows, dtype=torch.long, device=state.device)
+            rollout_out = wm(
+                rollout_z,
+                noise_t,
+                events_t,
+                valid_t,
+                zeros_t,
+                zeros_t,
+                state_token_valid=model.state_token_valid(rollout_state),
+            )
+            rollout_z = rollout_out["base"]
+            rollout_correction.append(rollout_out["correction"].pow(2).mean())
+            target_state_t = next_state_sequence[row_index, time_index]
+            target_globals_t = next_global_sequence[row_index, time_index]
+            target_z_t = target_z_sequence[row_index, time_index]
+            discount = rollout_z.new_tensor(
+                float(rollout_discount) ** (time_index - 1)
+            )
+            rollout_weights_sum = rollout_weights_sum + discount
+            if rollout_latent_coef > 0.0:
+                token_weights, _ = _structured_token_weights(
+                    model.tokenizer,
+                    (rollout_state, target_state_t),
+                    rollout_z,
+                    target_z_t,
+                    active_boost=active_token_boost,
+                    changed_boost=changed_token_boost,
+                    change_threshold=change_threshold,
+                    padding_weight=padding_token_weight,
+                )
+                rollout_latent = rollout_latent + discount * _weighted_token_mse(
+                    rollout_z, target_z_t, token_weights
+                )
+            if rollout_grounding_coef > 0.0:
+                true_source_t = state_sequence[row_index, time_index]
+                source_cmp, target_cmp = true_source_t.clone(), target_state_t.clone()
+                source_cmp[..., 2] = -1
+                target_cmp[..., 2] = -1
+                changed_t = (source_cmp != target_cmp).any(-1)
+                cell_weights_t = (
+                    1.0 + float(canonical_changed_boost) * changed_t
+                )
+                grounding_t, metrics_t = structured_reconstruction_loss(
+                    model.tokenizer,
+                    model.tokenizer.decode(wm.denormalize(rollout_z)),
+                    target_state_t,
+                    target_globals_t,
+                    cell_weights=cell_weights_t,
+                )
+                rollout_grounding = rollout_grounding + discount * grounding_t
+                rollout_exact_cell = (
+                    rollout_exact_cell + discount * metrics_t["tok/exact_cell"]
+                )
+                rollout_exact_frame = (
+                    rollout_exact_frame + discount * metrics_t["tok/exact_frame"]
+                )
+                rollout_exact_globals = (
+                    rollout_exact_globals + discount * metrics_t["tok/exact_globals"]
+                )
+            rollout_steps += 1
+        rollout_weights_sum = rollout_weights_sum.clamp_min(1.0e-8)
+        rollout_grounding = rollout_grounding / rollout_weights_sum
+        rollout_latent = rollout_latent / rollout_weights_sum
+        rollout_exact_cell = rollout_exact_cell / rollout_weights_sum
+        rollout_exact_frame = rollout_exact_frame / rollout_weights_sum
+        rollout_exact_globals = rollout_exact_globals / rollout_weights_sum
+        if rollout_correction:
+            correction_regularizer = correction_regularizer + torch.stack(
+                rollout_correction
+            ).mean()
 
     total = (
         float(factual_coef) * factual
@@ -1058,6 +1353,9 @@ def structured_causal_paired_loss(
         + float(effect_cosine_coef) * effect_cosine_loss
         + float(effect_norm_coef) * effect_norm_loss
         + float(canonical_grounding_coef) * grounding
+        + float(canonical_effect_margin_coef) * categorical_effect_margin
+        + float(rollout_grounding_coef) * rollout_grounding
+        + float(rollout_latent_coef) * rollout_latent
         + float(residual_correction_coef) * correction_regularizer
     )
     metrics = {
@@ -1085,6 +1383,8 @@ def structured_causal_paired_loss(
         "causal/effect_target_norm_sum": effect_target_norm_sum.detach(),
         "causal/grounding_factual": grounding_factual.detach(),
         "causal/grounding_counterfactual": grounding_counterfactual.detach(),
+        "causal/categorical_effect_margin": categorical_effect_margin.detach(),
+        "causal/categorical_effect_fields": categorical_effect_fields.detach(),
         "causal/correction_regularizer": correction_regularizer.detach(),
         "causal/cf_valid_fraction": cf_valid.float().mean().detach(),
         "causal/effect_token_fraction": effect_token_fraction.detach(),
@@ -1093,6 +1393,12 @@ def structured_causal_paired_loss(
         "causal/changed_token_fraction": factual_stats["changed_fraction"].detach(),
         "action/overflow": overflow.float().mean().detach(),
         "action/counterfactual_overflow": cf_overflow.detach(),
+        "rollout/grounding": rollout_grounding.detach(),
+        "rollout/latent": rollout_latent.detach(),
+        "rollout/exact_cell": rollout_exact_cell.detach(),
+        "rollout/exact_frame": rollout_exact_frame.detach(),
+        "rollout/exact_globals": rollout_exact_globals.detach(),
+        "rollout/steps": factual.new_tensor(float(rollout_steps)).detach(),
     }
     metrics.update(grounding_metrics)
     return total, metrics

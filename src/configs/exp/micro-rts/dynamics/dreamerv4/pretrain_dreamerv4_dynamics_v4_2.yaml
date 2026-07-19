@@ -1,0 +1,128 @@
+# DreamerV4 Phase-2 DYNAMICS pretraining, v4.2 — junk-action masking: the
+# root-cause fix for the flat CF-PROBE, on top of the v4.1 recipe.
+#
+# Why v4.2 (diagnosis on the raw v3 store, 40k sampled transitions): the
+# stored self-action tensor is the policy's raw GridNet output over ALL 256
+# cells; the engine executes only legal-source cells. Measured:
+#   * 83% of cells carry a nonzero action-type on a ~93%-empty board;
+#     96.8% of nonzero entries sit on cells with no own unit — never executed.
+#   * P(cell changes next frame | stored action != noop) lift: 1.3x (noise).
+#   * Same, restricted to legal-source cells: 0.633 vs 0.009 base = 70x lift
+#     (plus a 2.2x neighbor-cell halo from move/attack/produce).
+# The world model was fed ~247 noise tokens per frame hiding ~1 real one —
+# ignoring the action channel was the statistically correct response, which is
+# why v4's output-side cell weighting only nudged self_gap (mostly-positive,
+# never growing). Corroboration: the opponent channel is recorded from
+# engine-EXECUTED actions (jar patch) and is clean — and opp_gap outran
+# self_gap in every run.
+#
+# FIX (loss.dreamer.mask_actions_to_sources, gated by
+# model.dynamics.mask_junk_actions): NOOP the self-action at every cell
+# without an idle own unit (own-unit plane AND action-none plane, ≈ the
+# engine's source-legality mask) before the action encoder — applied in the
+# train loop, val probes, eval_dreamer_dynamics (reads the flag from the
+# checkpoint), and the RL trainer's replay/imagination-seed paths. Opponent
+# channel untouched. No recollection needed.
+#
+# Kept from v4.1: tokenizer_v4 latents, cell weighting (dialed back from the
+# 48x escalation to v4's 16x — that was compensating for the input noise this
+# fix removes), batch 32 + eval_batches 24 (readable probe), bf16.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
+#       --exp micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics_v4_2
+#
+# GATE (pre-registered): CF-PROBE self_gap > 0 and GROWING by ~10k steps.
+# With a 70x-lift input signal this should be unambiguous; if it is STILL
+# flat, the action-encoder injection path itself is suspect (inspect
+# GridActionEncoder token flow before any further loss tuning).
+# History: docs/micro-rts/DREAMERV4_V4_DESIGN.md + this header chain
+# (v3 -> v4 -> v4.1 -> v4.2).
+
+run:
+  name: pretrain_dreamerv4_dynamics_v4_2
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5          # unused this phase
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_tokenizer_v4.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # transformer unchanged since v3
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.15       # marginal/conditional in one model; fog-of-war hook
+    # v4.2: THE fix — strip the ~97% never-executed junk from the self-action
+    # channel before the action encoder (see header + mask_actions_to_sources).
+    mask_junk_actions: true
+    # Cell weighting back at v4 levels: 48x/0.5 (v4.1) was escalation against
+    # input noise that no longer exists; 16x is the calibrated foreground fix.
+    cell_occ_boost: 4.0
+    cell_changed_boost: 16.0
+    cell_weight_floor: 1.0
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true
+    world_model: false
+    actor: true
+    critic: true
+
+data:
+  # Same validated v3 store — the junk was in how actions were FED, not stored;
+  # masking at load time fixes it without recollection.
+  path: /data/micro-rts/tokdyn_pretrain_v3__*.h5
+
+training:
+  amp: true                 # bf16 autocast -> SDPA takes the flash-attention kernel
+  steps: 60000
+  batch: 32
+  seq_len: 16
+  num_workers: 8
+  reward_coef: 1.0
+  cont_coef: 1.0
+  flow_coef: 1.0
+  flow_self_frac: 0.25          # linear ramp start ...
+  flow_self_frac_final: 0.5     # ... to here by the last step (distillation budget)
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 24          # keep the de-noised probe from v4.1
+  rollout_context: 8
+  rollout_samples: 4        # best-of-N open-loop samples (residual stochasticity)
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_dynamics_v4_2.pt
+  tokenizer_ckpt: checkpoints/dreamer_tokenizer_v4.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, dynamics, phase2, frozen-tokenizer, v4.2, junk-action-mask, cell-weighted-loss, tokenizer-v4]

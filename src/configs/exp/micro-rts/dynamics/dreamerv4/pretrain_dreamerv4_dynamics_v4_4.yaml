@@ -1,0 +1,151 @@
+# DreamerV4 Phase-2 DYNAMICS pretraining, v4.4 — opponent-policy head:
+# privileged opponent-action BC on the trunk + an explicit dream opponent,
+# on top of the v4.3 recipe that fixed self-action conditioning.
+#
+# Why v4.4 (v4.3 60k eval, checkpoints/dynamics_eval_v4_3): the self side is
+# SOLVED — issued-cell self CF gap +0.1464 = +48.5% of true-action MSE (gate
+# asked for tens of percent; v4.2 was +3.7%), and rollout reward corr collapses
+# 0.65 -> ~0 under shuffled/noop self actions. The one FAIL: the opponent
+# channel is still ignored (issued-cell opp gap -0.3%). Without an opponent,
+# imagination plays against the unknown_opp MARGINAL — an averaged, passive
+# opponent a league actor can learn to exploit (the residual risk from the
+# oqwvpf7g failure analysis).
+#
+# FIX 1 (model.dynamics.opp_head, loss.dreamer.opponent_bc_loss): a per-cell
+# opponent-action BC head on the transformer TRUNK, trained on the jar-patch's
+# engine-executed opponent actions (privileged: training-time only — the
+# LIAM/"Dreaming of Others" recipe, and the exact interface fog-of-war will
+# reuse). CE only at opponent source cells (idle enemy unit, ~1% of the board
+# — same imbalance logic as the cell-weighted flow loss), conditional
+# components scored only where the true type selects them, terminal-splice
+# slots masked, sigma-weighted like the empirical flow rows. Reading the
+# trunk (not the raw latent) is deliberate: the BC gradient forces the
+# dynamics transformer's hidden state to track opponent intent — the
+# auxiliary conditioning signal the opp channel never generated on its own.
+#
+# FIX 2 (DreamerV4.imagine): when no opponent_policy is given, each imagined
+# step samples the head (clean trunk pass, source-masked via the decoded
+# frame) and feeds it through the SAME opp injection channel as real opponent
+# actions — MBOM level-0: an explicit acting opponent inside dreams instead
+# of the marginal. Costs one extra clean pass per imagined step (~+25%
+# imagination compute at flow_steps=4).
+#
+# ALSO: opp_dropout 0.15 -> 0.05. Dropout existed so the marginal model stayed
+# usable in imagination; the head now covers that, and every dropped frame is
+# a frame the conditional pathway gets no gradient — a licensed excuse to
+# settle on the marginal (prime suspect for the dead opp gap). Kept at 0.05
+# (not 0) so unknown_opp stays trained as the fog-of-war fallback.
+#
+# Kept: action_inject add (v4.3), junk-action masking (v4.2), tokenizer_v4
+# latents, 16x cell weighting (v4), batch 32 + eval_batches 24 (v4.1), bf16.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
+#       --exp micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics_v4_4
+#
+# GATES (pre-registered):
+#   1. probe/self_gap_issued stays at v4.3 level (~+0.13 by 60k) — the BC
+#      gradient must NOT degrade the fixed self conditioning. If flow/mse
+#      degrades vs v4.3, lower training.opp_bc_coef first.
+#   2. probe/opp_gap_issued > 0 and growing (v4.3: -0.3% at eval). Reference:
+#      the self side hit +48.5%; opp success looks like the same climb.
+#   3. opp_bc/type_acc well above the NOOP base rate and val/opp_bc_loss
+#      falling — the head must actually predict the (near-deterministic
+#      expert-bot) opponent for the dream opponent to mean anything.
+# If gate 2 STILL fails with a good BC head (gate 3 passing), the opp channel
+# input path itself is suspect — run the step-0 diagnostics (opp action frame
+# alignment in the v3 store; per-channel injection projections) before any
+# formulation change. History: DREAMERV4_V4_DESIGN.md + header chain v3 -> v4.4.
+
+run:
+  name: pretrain_dreamerv4_dynamics_v4_4
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5          # unused this phase
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_tokenizer_v4.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.05       # v4.4: 0.15 -> 0.05 (see header; head replaces the
+                            # marginal in imagination, keep only a fog-of-war floor)
+    mask_junk_actions: true # v4.2: strip never-executed junk from the self channel
+    action_inject: add      # v4.3: per-cell action features onto latent tokens
+    # v4.4: opponent-policy BC head on the trunk (privileged labels; sampled
+    # as the dream opponent). See header + models/dreamer/world_model.py.
+    opp_head: true
+    opp_head_channels: 64
+    cell_occ_boost: 4.0     # v4 foreground weighting, calibrated levels
+    cell_changed_boost: 16.0
+    cell_weight_floor: 1.0
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true
+    world_model: false
+    actor: true
+    critic: true
+
+data:
+  path: /data/micro-rts/tokdyn_pretrain_v3__*.h5
+
+training:
+  amp: true                 # bf16 autocast -> SDPA takes the flash-attention kernel
+  steps: 60000
+  batch: 32
+  seq_len: 16
+  num_workers: 8
+  reward_coef: 1.0
+  cont_coef: 1.0
+  flow_coef: 1.0
+  opp_bc_coef: 1.0          # matches the reward-head precedent (aux CE on the
+                            # trunk at coef 1.0); FIRST knob to lower if flow/mse
+                            # or self_gap_issued regress vs v4.3
+  flow_self_frac: 0.25          # linear ramp start ...
+  flow_self_frac_final: 0.5     # ... to here by the last step (distillation budget)
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 24
+  rollout_context: 8
+  rollout_samples: 4        # best-of-N open-loop samples (residual stochasticity)
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_dynamics_v4_4.pt
+  tokenizer_ckpt: checkpoints/dreamer_tokenizer_v4.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, dynamics, phase2, frozen-tokenizer,
+         v4.4, opp-policy-head, opp-bc, action-inject-add, junk-action-mask,
+         cell-weighted-loss, tokenizer-v4]

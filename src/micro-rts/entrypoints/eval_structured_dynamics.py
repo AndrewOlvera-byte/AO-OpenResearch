@@ -16,6 +16,7 @@ for p in (HERE.parents[1], HERE.parents[2]):
 import torch
 
 from collectors.offline_data import build_mrts_loader, to_device
+from entrypoints.pretrain_common import amp_ctx, setup_backend
 from models.dreamer_v2 import (
     StructuredDynamicsConfig,
     StructuredTokenizerConfig,
@@ -44,9 +45,12 @@ def main(argv=None):
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--batches", type=int, default=16)
     p.add_argument("--flow-steps", type=int, default=4)
+    p.add_argument("--val-frac", type=float, default=0.05)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
     a = p.parse_args(argv)
     device = device_from(a.device)
+    setup_backend(device)
     ckpt = torch.load(a.checkpoint, map_location="cpu")
     tc = StructuredTokenizerConfig.from_dict(ckpt["tokenizer_cfg"])
     dc = StructuredDynamicsConfig.from_dict(ckpt["dynamics_cfg"])
@@ -60,8 +64,12 @@ def main(argv=None):
         batch_size=a.batch,
         num_workers=0,
         locking=False,
+        val_frac=a.val_frac,
+        split="val",
         shuffle=False,
         drop_last=False,
+        fixed_chunk_batches=a.batches,
+        fixed_chunk_seed=a.seed,
     )
     sums = {
         "latent_mse": 0.0,
@@ -69,6 +77,11 @@ def main(argv=None):
         "present_acc": 0.0,
         "type_acc": 0.0,
         "exact_cell": 0.0,
+        "exact_occupied_cell": 0.0,
+        "exact_assigned_cell": 0.0,
+        "exact_frame": 0.0,
+        "exact_globals": 0.0,
+        "exact_roundtrip": 0.0,
         "changed_f1": 0.0,
         "self_cf_gap": 0.0,
         "paired_cf_latent_mse": 0.0,
@@ -89,14 +102,17 @@ def main(argv=None):
             z1 = model.tokenizer.encode(nxt, nglob)
             state_valid = model.state_token_valid(state)
             ev, valid, _ = model.action_events(state, act, opp)
-            predz = model.dynamics.sample_next(
-                z0,
-                ev,
-                valid,
-                a.flow_steps,
-                state_token_valid=state_valid,
-            )
-            pred, _ = model.tokenizer.discretize(model.tokenizer.decode(predz))
+            with amp_ctx(device, device.type == "cuda"):
+                predz = model.dynamics.sample_next(
+                    z0,
+                    ev,
+                    valid,
+                    a.flow_steps,
+                    state_token_valid=state_valid,
+                )
+                pred, pred_globals = model.tokenizer.discretize(
+                    model.tokenizer.decode(predz)
+                )
             sums["latent_mse"] += float(
                 (model.dynamics.normalize(predz) - model.dynamics.normalize(z1))
                 .pow(2)
@@ -114,7 +130,21 @@ def main(argv=None):
                 if occupied.any()
                 else 1.0
             )
-            sums["exact_cell"] += float((pred == nxt).all(-1).float().mean())
+            exact_cell = (pred == nxt).all(-1)
+            exact_globals = (pred_globals == nglob).all(-1)
+            sums["exact_cell"] += float(exact_cell.float().mean())
+            sums["exact_occupied_cell"] += float(
+                exact_cell[occupied].float().mean() if occupied.any() else 1.0
+            )
+            assigned = nxt[..., 7].bool()
+            sums["exact_assigned_cell"] += float(
+                exact_cell[assigned].float().mean() if assigned.any() else 1.0
+            )
+            sums["exact_frame"] += float(exact_cell.all(-1).float().mean())
+            sums["exact_globals"] += float(exact_globals.float().mean())
+            sums["exact_roundtrip"] += float(
+                (exact_cell.all(-1) & exact_globals).float().mean()
+            )
             changed = (state != nxt).any(-1)
             pred_changed = (state != pred).any(-1)
             sums["changed_f1"] += _f1(pred_changed, changed)

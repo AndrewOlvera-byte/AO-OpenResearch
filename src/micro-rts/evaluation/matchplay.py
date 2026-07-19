@@ -31,7 +31,15 @@ def run_match_eval(policy, env, env_bots, games, max_steps, device, deterministi
         mask = trans.get("mask", None)
         if mask is not None:
             mask = mask.to(device)
-        out = policy.step(trans["obs"].to(device), mask, deterministic=deterministic)
+        kwargs = {}
+        if getattr(policy, "uses_structured_state", False):
+            kwargs = {
+                "state": trans["full_state"].to(device),
+                "globals_": trans["full_globals"].to(device),
+            }
+        out = policy.step(
+            trans["obs"].to(device), mask, deterministic=deterministic, **kwargs
+        )
         trans = env.step(out["action"])
         ep_len += 1
         steps += 1

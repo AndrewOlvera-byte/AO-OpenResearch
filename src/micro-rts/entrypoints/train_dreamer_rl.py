@@ -13,9 +13,9 @@ phase-2 pretrain checkpoint via ``training.dreamer.init_from``):
   in the loop (the model-free sample-efficiency baseline).
 
 Usage:
-    python train_dreamer_rl.py --exp micro-rts/rl_dreamerv4_imagination
-    python train_dreamer_rl.py --exp micro-rts/rl_dreamerv4_hybrid --test
-    python train_dreamer_rl.py --exp micro-rts/rl_dreamerv4_online --no-wandb \
+    python train_dreamer_rl.py --exp micro-rts/rl/dreamerv4/rl_dreamerv4_imagination
+    python train_dreamer_rl.py --exp micro-rts/rl/dreamerv4/rl_dreamerv4_hybrid --test
+    python train_dreamer_rl.py --exp micro-rts/rl/dreamerv4/rl_dreamerv4_online --no-wandb \
         --set training.dreamer.horizon=32 --set training.dreamer.amp=false
 
 Flags mirror ``train_entry.py`` (the PPO entrypoint): ``--exp`` selects an
@@ -43,17 +43,24 @@ for p in (str(_PKG), str(_SRC)):
 from core.config import Config  # noqa: E402
 
 import models.dreamer  # noqa: E402,F401  (registry side effect)
+import models.dreamer_v2  # noqa: E402,F401  (structured agent registry)
 from trainers.DreamerRLTrainer import DreamerRLTrainer  # noqa: E402
+from trainers.StructuredDreamerRLTrainer import StructuredDreamerRLTrainer  # noqa: E402
 from trainers.BaseTrainer import resolve_device  # noqa: E402
 
 
-def build_trainer(args) -> DreamerRLTrainer:
+def build_trainer(args) -> DreamerRLTrainer | StructuredDreamerRLTrainer:
     cfg = Config.from_experiment(args.exp)
     overrides = list(args.set)
     if args.mode:
         overrides.append(f"training.dreamer.mode={args.mode}")
     cfg.apply_overrides(overrides)
-    trainer = DreamerRLTrainer(cfg)
+    trainer_cls = (
+        StructuredDreamerRLTrainer
+        if cfg.model.get("type") == "structured_dreamer"
+        else DreamerRLTrainer
+    )
+    trainer = trainer_cls(cfg)
     if args.device:
         trainer.device = resolve_device(args.device)
     if args.no_wandb:
@@ -65,7 +72,7 @@ def build_trainer(args) -> DreamerRLTrainer:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MicroRTS DreamerV4 trainer")
-    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/base_dreamerv4")
+    parser.add_argument("--exp", required=True, help="experiment name, e.g. micro-rts/rl/dreamerv4/base_dreamerv4")
     parser.add_argument("--mode", choices=["imagination", "hybrid", "online"], default=None,
                         help="override training.dreamer.mode: actor/critic gradient source "
                              "(imagination = frozen pretrained WM, hybrid = WM keeps training, "
@@ -83,6 +90,7 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     trainer = build_trainer(args)
     if args.test:
+        trainer.use_wandb = False
         print("smoke ok:", trainer.smoke_test())
     else:
         trainer.train()

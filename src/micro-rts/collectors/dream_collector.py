@@ -121,15 +121,27 @@ class _DreamCollectorBase:
         probe_mask = stream.trans.get("mask", None)
         n = stream.rows(stream.trans["obs"]).shape[0]
         with torch.no_grad():
+            kwargs = {}
+            if getattr(self.policy, "uses_structured_state", False):
+                kwargs = {
+                    "state": stream.rows(stream.trans["full_state"]).to(self.device),
+                    "globals_": stream.rows(stream.trans["full_globals"]).to(self.device),
+                }
             out = self.policy.step(
                 stream.rows(stream.trans["obs"]).to(self.device),
-                stream.rows(probe_mask).to(self.device) if probe_mask is not None else None)
+                stream.rows(probe_mask).to(self.device) if probe_mask is not None else None,
+                **kwargs)
         action_shape = tuple(out["action"].shape[1:])
         mask_shape = tuple(stream.rows(probe_mask).shape[1:]) if probe_mask is not None else (0,)
+        state_shape = tuple(stream.trans["full_state"].shape[1:]) \
+            if "full_state" in stream.trans.keys() else None
+        globals_shape = tuple(stream.trans["full_globals"].shape[1:]) \
+            if "full_globals" in stream.trans.keys() else None
         return SequenceReplayBuffer(
             capacity or max(self.horizon * 4, self.horizon), n,
             stream.env.obs_shape, action_shape, mask_shape, self.device,
             storage_device=storage_device,
+            state_shape=state_shape, globals_shape=globals_shape,
         )
 
     @torch.no_grad()
@@ -142,10 +154,23 @@ class _DreamCollectorBase:
 
         obs = stream.rows(obs_all)
         mask = stream.rows(mask_all) if mask_all is not None else None
-        out = self.policy.step(obs, mask)
+        policy_kwargs = {}
+        if getattr(self.policy, "uses_structured_state", False):
+            policy_kwargs = {
+                "state": stream.rows(trans["full_state"]).to(self.device),
+                "globals_": stream.rows(trans["full_globals"]).to(self.device),
+            }
+        out = self.policy.step(obs, mask, **policy_kwargs)
         if stream.paired:
+            opp_kwargs = {}
+            if getattr(opponent, "uses_structured_state", False):
+                opp_kwargs = {
+                    "state": trans["full_state"][1::2].to(self.device),
+                    "globals_": trans["full_globals"][1::2].to(self.device),
+                }
             opp = opponent.step(obs_all[1::2],
-                                mask_all[1::2] if mask_all is not None else None)
+                                mask_all[1::2] if mask_all is not None else None,
+                                **opp_kwargs)
             actions = torch.empty((stream.env.num_envs, *out["action"].shape[1:]),
                                   dtype=out["action"].dtype, device=out["action"].device)
             actions[0::2] = out["action"]
@@ -160,6 +185,8 @@ class _DreamCollectorBase:
         # Terminal splice: this slot's obs is a fresh reset frame hiding last
         # step's terminal arrival — substitute the true arrival (module docstring).
         obs_store, mask_store, is_first = obs, mask, raw_first
+        state_store = stream.rows(trans["full_state"]) if "full_state" in trans.keys() else None
+        globals_store = stream.rows(trans["full_globals"]) if "full_globals" in trans.keys() else None
         if stream.carry_first is not None:
             is_first = is_first | stream.carry_first
             stream.carry_first = None
@@ -175,6 +202,11 @@ class _DreamCollectorBase:
                     mask_store = mask.clone()
                     mask_store[sub] = 0            # game over: nothing is legal
                 is_first = is_first & ~sub
+                if state_store is not None:
+                    state_store = state_store.clone()
+                    globals_store = globals_store.clone()
+                    state_store[sub] = stream.rows(trans["terminal_full_state"])[sub]
+                    globals_store[sub] = stream.rows(trans["terminal_full_globals"])[sub]
                 stream.carry_first = sub           # next slot starts the episode
         stream.pending_done = None
 
@@ -205,6 +237,8 @@ class _DreamCollectorBase:
             reward=stream.rows(nxt["reward"]).to(self.device),
             cont=(~stream.rows(nxt["done"])).float().to(self.device),
             is_first=is_first,
+            full_state=state_store,
+            full_globals=globals_store,
         )
         if self.memory is not None and "z" in out.keys():
             # Live context keeps the REAL frame semantics (raw is_first).

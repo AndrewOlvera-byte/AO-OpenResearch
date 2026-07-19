@@ -1,0 +1,115 @@
+# Full-budget successor to the successful 40k frozen-router trust-region run.
+# This is a fresh optimization run: the state/action tokenizers and transferred
+# action prior are loaded, while the residual transition correction starts from
+# its zero initialization and no dynamics checkpoint is resumed.
+run:
+  name: pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region_160k
+  seed: 0
+  device: auto
+
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 128
+    d_latent: 128
+    downsample: 2
+    depth: 2
+    n_heads: 4
+    max_unit_types: 16
+    max_entities: 128
+  dynamics:
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 32
+    k_max: 16
+    prior_fraction: 0.0
+    skip_fraction: 0.0
+    initial_noise: zero
+    action_encoder_type: factorized
+    action_field_dim: 64
+    residual_prediction: true
+    pretrained_action_router: true
+    explicit_spatial_action_routing: true
+    mask_empty_entity_tokens: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__*.h5
+
+training:
+  objective: causal_paired
+
+  # RTX 5070 Ti benchmark (same model/data, 150 steps): batch 32 ~=250,
+  # batch 48 ~=243, batch 64 ~=255 seq/s. Batch 64 is the measured optimum.
+  amp: true
+  steps: 160000
+  batch: 64
+  seq_len: 1
+  num_workers: 8
+
+  # Batch 64 supports a modest increase over the proven 1e-5 peak. Keep the
+  # complete transferred action interface frozen and use conservative restarts
+  # to continue fitting without recreating the old router/correction co-adaption.
+  lr: 1.25e-5
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  freeze_action_encoder: true
+  freeze_action_router: true
+
+  # Preserve the objective that improved broad and paired-CF fidelity. Exact
+  # canonical grounding remains a separately gated follow-up: adding it here
+  # would confound this clean full-budget test and previously harmed latent fit.
+  causal_factual_coef: 1.0
+  causal_counterfactual_coef: 1.0
+  causal_effect_coef: 2.0
+  causal_effect_cosine_coef: 0.05
+  causal_effect_norm_coef: 0.02
+  residual_correction_coef: 0.50
+  active_token_boost: 1.0
+  changed_token_boost: 2.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 1.0
+  canonical_grounding_coef: 0.0
+  canonical_changed_boost: 0.0
+
+  paired_batch_fraction: 0.50
+  val_frac: 0.05
+
+  # The old 500-step cadence made cumulative throughput look ~40% slower.
+  # Fixed 64-batch validation every 2k still gives 80 comparable checkpoints.
+  eval_every: 2000
+  eval_batches: 64
+  fixed_val: true
+  fixed_val_seed: 0
+  probe_flow_steps: 1
+  probe_samples: 256
+
+  warmup_steps: 1000
+  lr_stages:
+    - {end_step: 60000, start_frac: 1.0, end_frac: 0.25}
+    - {end_step: 110000, start_frac: 0.50, end_frac: 0.12, warmup_steps: 1000}
+    - {end_step: 160000, start_frac: 0.12, end_frac: 0.03}
+  lr_min_frac: 0.03
+  log_every: 100
+  average_train_metrics: true
+
+  tokenizer_ckpt: checkpoints/structured_tokenizer_v2.pt
+  action_tokenizer_ckpt: checkpoints/structured_action_tokenizer_v2.pt
+  out: checkpoints/structured_dynamics_v2_causal_paired_action_residual_trust_region_160k.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 5
+    monitor: val/causal/unweighted_mse
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region_160k
+  tags: [micro-rts, structured-v2, causal-paired, deterministic, residual,
+         trust-region, frozen-router, full-padding, pretrained-action, 160k,
+         batch-64, bf16, flash-sdpa]

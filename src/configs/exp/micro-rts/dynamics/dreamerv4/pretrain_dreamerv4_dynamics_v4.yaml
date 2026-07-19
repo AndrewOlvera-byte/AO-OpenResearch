@@ -1,0 +1,125 @@
+# DreamerV4 Phase-2 DYNAMICS pretraining, v4 — cell-weighted flow loss on the
+# SAME v3 corpus (NEXT_PLAN.md dynamics-v4 diagnosis).
+#
+# Why v4 (diagnosis of the v3 NO-GO, eval_dreamer_dynamics.py + training-time
+# CF-PROBE): tokenizer reconstruction is excellent (occupied-cell accuracy
+# 97-99% across all channel groups) — this is NOT a latent-bandwidth problem.
+# It's a gradient signal-to-noise problem: MicroRTS boards are ~99% static
+# background (obs/changed_cell_frac ~0.011 in the eval), and
+# shortcut_forcing_loss's flow-matching MSE averaged UNIFORMLY over the
+# n_spatial latent grid dilutes the ~1%-of-cells action-caused signal into
+# that background 100:1. The model hits a good aggregate loss (and even a
+# fine reward/continue head, since those correlate with *board state* not the
+# *action taken*) while never learning to condition on the action: CF-PROBE
+# self_gap oscillated around 0 for the entire 60k-step v3 run (last value
+# -0.0095, no trend), and eval_dreamer_dynamics.py failed action_conditioning
+# (counterfactual/real step-1 MSE ratio ~1.02, must be >1).
+#
+# FIX: loss.dreamer.cell_weights reweights the per-cell flow MSE toward
+# occupied and (especially) changed cells before the spatial mean — the
+# standard fix for extreme foreground/background imbalance in dense
+# prediction (focal-loss-style reweighting; occupancy-only losses in
+# voxel/video world models). All-1.0 boosts reduce to the old v3 behavior
+# exactly, so this is a pure ablation of the loss weighting, same corpus,
+# same architecture, same step budget.
+#
+# ARCH/DATA: identical to v3 — same frozen tokenizer_v3 checkpoint (tokenizer
+# is not the bottleneck, do not retouch it), same tokdyn_pretrain_v3 store.
+# `model.tokenizer` block MUST stay byte-for-byte identical to
+# pretrain_dreamerv4_tokenizer_v3.yaml's.
+#
+#   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
+#       --exp micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics_v4
+#
+# GATE (same as v3, this is the number that must move): CF-PROBE self_gap /
+# opp_gap > 0 and GROWING with horizon — watch it from step 1000, not just at
+# the end; if it's still flat by ~10k steps the reweighting alone isn't
+# enough and the boosts (or opp_dropout) need another pass before spending a
+# full run. Then eval_dreamer_dynamics.py's action_conditioning verdict.
+
+run:
+  name: pretrain_dreamerv4_dynamics_v4
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: dreamerv4
+  world_lr: 1.0e-4
+  actor_lr: 3.0e-5          # unused this phase
+  critic_lr: 1.0e-4         # unused this phase
+  grad_clip: 10.0
+  detach_latents: true
+  tokenizer:                # <<< MUST MATCH pretrain_dreamerv4_tokenizer_v3.yaml >>>
+    enc_channels: 96
+    d_latent: 32
+    tanh_bottleneck: true
+  dynamics:                 # v3 transformer + joint-action conditioning, unchanged
+    d_model: 512
+    depth: 10
+    n_heads: 8
+    n_register: 4
+    time_every: 2
+    k_max: 16
+    reward_bins: 255
+    action_emb: 32
+    action_channels: 64
+    opp_dropout: 0.15       # marginal/conditional in one model; fog-of-war hook
+    # v4: cell-weighted flow loss (see loss.dreamer.cell_weights). Background
+    # cells (the ~99% static board) get floor=1.0; occupied cells get 4x;
+    # cells whose one-hot state changed vs the previous frame — the actual
+    # action-caused transition — get 16x (maxed with occ_boost, not summed).
+    cell_occ_boost: 4.0
+    cell_changed_boost: 16.0
+    cell_weight_floor: 1.0
+  actor_critic:
+    dec_channels: 64
+    critic_hidden: [256]
+    imagine_horizon: 15
+    imagine_context: 8
+    imagine_flow_steps: 4
+    gamma: 0.99
+    lam: 0.95
+    entropy_coef: 3.0e-3
+    critic_ema: 0.98
+    critic_bins: 255
+    return_norm: true
+    return_norm_rate: 0.01
+    return_norm_limit: 1.0
+  freeze:
+    tokenizer: true
+    world_model: false
+    actor: true
+    critic: true
+
+data:
+  # Same v3 store — this run isolates the loss-weighting change, not the data.
+  path: /data/micro-rts/tokdyn_pretrain_v3__*.h5
+
+training:
+  amp: true                 # bf16 autocast -> SDPA takes the flash-attention kernel
+  steps: 60000
+  batch: 16
+  seq_len: 16
+  num_workers: 8
+  reward_coef: 1.0
+  cont_coef: 1.0
+  flow_coef: 1.0
+  flow_self_frac: 0.25          # linear ramp start ...
+  flow_self_frac_final: 0.5     # ... to here by the last step (distillation budget)
+  warmup_steps: 1000
+  lr_min_frac: 0.1
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 8
+  rollout_context: 8
+  rollout_samples: 4        # best-of-N open-loop samples (residual stochasticity)
+  log_every: 100
+  save_every: 5000
+  out: checkpoints/dreamer_dynamics_v4.pt
+  tokenizer_ckpt: checkpoints/dreamer_tokenizer_v3.pt
+
+wandb:
+  run_name: ${run.name}
+  tags: [micro-rts, dreamerv4, pretrain, dynamics, phase2, frozen-tokenizer, v4, cell-weighted-loss]

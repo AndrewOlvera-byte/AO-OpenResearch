@@ -28,13 +28,13 @@ from tensordict import TensorDict
 
 class SequenceReplayBuffer:
     def __init__(self, capacity, num_envs, obs_shape, action_shape, mask_shape,
-                 device="cpu", storage_device="cpu"):
+                 device="cpu", storage_device="cpu", state_shape=None,
+                 globals_shape=None):
         self.T_cap, self.N = int(capacity), int(num_envs)
         self.device = device                    # where sampled batches go
         self.storage_device = storage_device    # where the ring lives
         self.count = 0
-        self.data = TensorDict(
-            {
+        fields = {
                 # one-hot planes: uint8 in the ring, float32 out of sample()
                 "obs": torch.zeros(self.T_cap, self.N, *obs_shape, dtype=torch.uint8,
                                    device=storage_device),
@@ -54,7 +54,18 @@ class SequenceReplayBuffer:
                 "cont": torch.zeros(self.T_cap, self.N, device=storage_device),
                 "is_first": torch.zeros(self.T_cap, self.N, dtype=torch.bool,
                                         device=storage_device),
-            },
+            }
+        if state_shape is not None and globals_shape is not None:
+            fields.update({
+                "full_state": torch.zeros(
+                    self.T_cap, self.N, *state_shape, dtype=torch.long,
+                    device=storage_device),
+                "full_globals": torch.zeros(
+                    self.T_cap, self.N, *globals_shape, dtype=torch.long,
+                    device=storage_device),
+            })
+        self.data = TensorDict(
+            fields,
             batch_size=[self.T_cap, self.N],
             device=storage_device,
         )
@@ -69,20 +80,27 @@ class SequenceReplayBuffer:
         return self.size * self.N
 
     def add(self, *, obs, action, mask, reward, cont, is_first,
-            opponent_action=None, opponent_valid=None) -> None:
+            opponent_action=None, opponent_valid=None, full_state=None,
+            full_globals=None) -> None:
         phys = self.count % self.T_cap
         if opponent_action is None:
             opponent_action = torch.zeros_like(action)
         if opponent_valid is None:
             opponent_valid = torch.zeros(action.shape[0], dtype=torch.bool,
                                          device=action.device)
-        row = TensorDict(
-            {
+        fields = {
                 "obs": obs.to(torch.uint8), "action": action, "mask": mask.bool(),
                 "opponent_action": opponent_action,
                 "opponent_valid": opponent_valid.bool(),
                 "reward": reward, "cont": cont, "is_first": is_first.bool(),
-            },
+            }
+        if "full_state" in self.data.keys():
+            if full_state is None or full_globals is None:
+                raise ValueError("structured replay row is missing full state")
+            fields.update({"full_state": full_state.long(),
+                           "full_globals": full_globals.long()})
+        row = TensorDict(
+            fields,
             batch_size=[self.N],
         ).to(self.storage_device)
         self.data[phys] = row

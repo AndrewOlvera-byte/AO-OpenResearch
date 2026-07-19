@@ -1,0 +1,74 @@
+run:
+  name: pretrain_discrete_causal_transformer_v3_unfrozen_tail
+  seed: 0
+  device: auto
+
+model:
+  type: structured_discrete_v3
+  dynamics:
+    # Must remain architecture-identical to the 153k source checkpoint.
+    d_model: 512
+    depth: 8
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    max_action_events: 48
+    max_unit_types: 16
+    action_field_dim: 64
+    pretrained_action_router: true
+    zero_init_correction: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  amp: true
+  # Short diagnostic tail: long enough to move the pretrained interface, but
+  # intentionally much shorter than another full dynamics run.
+  steps: 30000
+  batch: 32
+  num_workers: 8
+  lr: 2.0e-5
+  action_interface_lr_scale: 0.25
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  factual_coef: 1.0
+  counterfactual_coef: 1.0
+  effect_margin_coef: 2.0
+  effect_margin: 1.0
+  paired_batch_fraction: 0.5
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 16
+  fixed_val_seed: 0
+  warmup_steps: 500
+  lr_min_frac: 0.10
+  log_every: 100
+
+  tokenizer_ckpt: checkpoints/discrete_tokenizer_v3_matrix_a_8x8_d4_k512.pt
+  action_jepa_ckpt: checkpoints/pretrain_discrete_action_tokenizer_v3/best.pt
+  # Weights only: the original optimizer omitted the frozen interface params.
+  init_from: checkpoints/pretrain_discrete_causal_transformer_v3/best.pt
+  freeze_action_interface: false
+
+  # Re-certify the inherited categorical action geometry before updating it.
+  preflight_batches: 4
+  preflight_min_effect_codes: 1
+  preflight_min_bidirectional_preference: 0.5
+  preflight_max_action_overflow: 0.0
+
+  out: checkpoints/discrete_causal_transformer_v3_unfrozen_tail.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/dynamics/total
+    mode: min
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_discrete_causal_transformer_v3_unfrozen_tail
+  tags: [micro-rts, discrete-v3, causal-transformer, unfrozen-tail,
+         action-interface-finetune, capacity-diagnostic]

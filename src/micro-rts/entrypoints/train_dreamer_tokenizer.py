@@ -16,7 +16,7 @@ Usage (inside the container)::
 
     # tiny CPU smoke (a couple of steps, no workers):
     python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
-        --data '/data/micro-rts/debug__*.h5' --exp micro-rts/smoke_dreamerv4 --smoke
+        --data '/data/micro-rts/debug__*.h5' --exp micro-rts/rl/smoke/smoke_dreamerv4 --smoke
 
 The model architecture comes from ``--exp`` (its ``model:`` block); obs/action
 shapes come from the dataset's stored attrs. ``--set K=V`` applies dotted-path
@@ -59,11 +59,23 @@ from entrypoints.pretrain_common import (  # noqa: E402
 
 def _main_structured(args, cfg):
     """Complete-state tokenizer using the same accelerated training harness."""
-    from models.dreamer_v2 import StructuredTokenizer, StructuredTokenizerConfig
+    from models.dreamer_v2 import (
+        StructuredTokenizer,
+        StructuredTokenizerConfig,
+        TemporalJEPAConfig,
+        TemporalJEPATokenizerPretrainer,
+        structured_temporal_jepa_loss,
+    )
     from models.dreamer_v2.tokenizer import structured_reconstruction_loss
     from entrypoints.structured_v2_common import measure_token_stats
 
     tr, mc = cfg.training or {}, cfg.model or {}
+    objective = str(tr.get("objective", "reconstruction"))
+    if objective not in ("reconstruction", "temporal_jepa"):
+        raise ValueError(
+            "structured tokenizer training.objective must be reconstruction or "
+            f"temporal_jepa, got {objective!r}"
+        )
     steps = _pick(args.steps, tr.get("steps"), 50000)
     batch = _pick(args.batch, tr.get("batch"), 64)
     seq_len = _pick(args.seq_len, tr.get("seq_len"), 1)
@@ -81,20 +93,36 @@ def _main_structured(args, cfg):
     setup_backend(device)
     amp = bool(tr.get("amp", True))
     val_frac = 0.0 if args.smoke else float(tr.get("val_frac", 0.0))
+    transition_data = objective == "temporal_jepa" or tr.get(
+        "paired_batch_fraction"
+    ) is not None
     loader = build_mrts_loader(
         path,
-        task="structured_tokenizer",
+        task=(
+            "structured_tokenizer_jepa"
+            if transition_data
+            else "structured_tokenizer"
+        ),
         seq_len=seq_len,
         batch_size=batch,
         num_workers=workers,
         locking=False,
         val_frac=val_frac,
         split="train",
+        paired_batch_fraction=(
+            tr.get("paired_batch_fraction")
+            if objective == "temporal_jepa"
+            else None
+        ),
     )
     val_loader = (
         build_mrts_loader(
             path,
-            task="structured_tokenizer",
+            task=(
+                "structured_tokenizer_jepa"
+                if transition_data
+                else "structured_tokenizer"
+            ),
             seq_len=seq_len,
             batch_size=batch,
             num_workers=0,
@@ -102,6 +130,13 @@ def _main_structured(args, cfg):
             val_frac=val_frac,
             split="val",
             drop_last=False,
+            shuffle=not bool(tr.get("fixed_val", True)),
+            fixed_chunk_batches=(
+                int(tr.get("eval_batches", 8))
+                if bool(tr.get("fixed_val", True))
+                else None
+            ),
+            fixed_chunk_seed=int(tr.get("fixed_val_seed", 0)),
         )
         if val_frac
         else None
@@ -111,10 +146,21 @@ def _main_structured(args, cfg):
     tc.mask_width, tc.legacy_obs_channels = 1 + sum(ds.action_nvec[1:]), ds.obs_channels
     if args.smoke:
         tc.d_cell, tc.d_latent, tc.depth, tc.n_heads = 16, 16, 1, 4
-    tokenizer = StructuredTokenizer(ds.grid_hw, tc).to(device)
+    jepa_cfg = TemporalJEPAConfig.from_dict(mc.get("temporal_jepa"))
+    if args.smoke:
+        jepa_cfg.d_model = 32
+        jepa_cfg.field_dim = 8
+        jepa_cfg.n_heads = 4
+        jepa_cfg.max_action_events = min(jepa_cfg.max_action_events, 8)
+    model = (
+        TemporalJEPATokenizerPretrainer(ds.grid_hw, tc, jepa_cfg)
+        if objective == "temporal_jepa"
+        else StructuredTokenizer(ds.grid_hw, tc)
+    ).to(device)
+    tokenizer = model.tokenizer if objective == "temporal_jepa" else model
     lr = float(args.lr if args.lr is not None else tr.get("lr", 3e-4))
     opt = make_adam(
-        tokenizer.parameters(),
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr,
         device,
         weight_decay=float(tr.get("weight_decay", 0.0)),
@@ -134,12 +180,17 @@ def _main_structured(args, cfg):
     out = args.out or tr.get("out", "checkpoints/structured_tokenizer_v2.pt")
     checkpoints = PretrainCheckpointManager(
         trainer,
-        tokenizer,
+        model,
         opt,
         sched,
         metadata={
             "phase": "structured_tokenizer_v2",
+            "objective": objective,
+            "transition_data": transition_data,
             "tokenizer_cfg": tc.__dict__,
+            "temporal_jepa_cfg": (
+                jepa_cfg.__dict__ if objective == "temporal_jepa" else None
+            ),
             "grid_hw": ds.grid_hw,
         },
         default_monitor="val/tok/total",
@@ -150,56 +201,112 @@ def _main_structured(args, cfg):
 
     @torch.no_grad()
     def run_val(step):
-        tokenizer.eval()
+        model.eval()
         sums, n = {}, 0
         for vb in val_loader:
             if n >= eval_batches:
                 break
             vb = to_device(vb, device)
             with amp_ctx(device, amp):
-                vd, _ = tokenizer(vb["state"], vb["globals"])
-                _, vm = structured_reconstruction_loss(
-                    tokenizer,
-                    vd,
-                    vb["state"],
-                    vb["globals"],
-                    vb.get("obs"),
-                    vb.get("mask"),
-                )
+                if objective == "temporal_jepa":
+                    _, vm = structured_temporal_jepa_loss(
+                        model,
+                        vb,
+                        reconstruction_coef=float(tr.get("reconstruction_coef", 1.0)),
+                        factual_coef=float(tr.get("jepa_factual_coef", 1.0)),
+                        counterfactual_coef=float(
+                            tr.get("jepa_counterfactual_coef", 1.0)
+                        ),
+                        effect_coef=float(tr.get("jepa_effect_coef", 2.0)),
+                        factual_grounding_coef=float(
+                            tr.get("jepa_factual_grounding_coef", 0.0)
+                        ),
+                        counterfactual_grounding_coef=float(
+                            tr.get("jepa_counterfactual_grounding_coef", 0.0)
+                        ),
+                        changed_token_boost=float(
+                            tr.get("changed_token_boost", 8.0)
+                        ),
+                        change_threshold=float(tr.get("change_threshold", 1e-3)),
+                        padding_token_weight=float(
+                            tr.get("padding_token_weight", 0.05)
+                        ),
+                    )
+                else:
+                    vd, _ = tokenizer(vb["state"], vb["globals"])
+                    _, vm = structured_reconstruction_loss(
+                        tokenizer,
+                        vd,
+                        vb["state"],
+                        vb["globals"],
+                        vb.get("obs"),
+                        vb.get("mask"),
+                    )
             for key, value in vm.items():
                 sums[f"val/{key}"] = sums.get(f"val/{key}", 0.0) + value
             n += 1
         vals = {key: value / n for key, value in sums.items()} if n else {}
         trainer.log(vals, step=step)
         checkpoints.record_eval(step, vals)
-        tokenizer.train()
+        model.train()
         if vals:
             print(
                 f"[tokenizer:structured_v2] step={step} VAL loss={vals['val/tok/total']:.4f}"
             )
 
-    tokenizer.train()
+    model.train()
     t0 = time.time()
     last_metrics = {}
     for step, b in zip(range(start_step + 1, steps + 1), cycle(loader)):
         b = to_device(b, device)
         with amp_ctx(device, amp):
-            decoded, z = tokenizer(b["state"], b["globals"])
-            loss, metrics = structured_reconstruction_loss(
-                tokenizer,
-                decoded,
-                b["state"],
-                b["globals"],
-                b.get("obs"),
-                b.get("mask"),
-            )
+            if objective == "temporal_jepa":
+                loss, metrics = structured_temporal_jepa_loss(
+                    model,
+                    b,
+                    reconstruction_coef=float(tr.get("reconstruction_coef", 1.0)),
+                    factual_coef=float(tr.get("jepa_factual_coef", 1.0)),
+                    counterfactual_coef=float(
+                        tr.get("jepa_counterfactual_coef", 1.0)
+                    ),
+                    effect_coef=float(tr.get("jepa_effect_coef", 2.0)),
+                    factual_grounding_coef=float(
+                        tr.get("jepa_factual_grounding_coef", 0.0)
+                    ),
+                    counterfactual_grounding_coef=float(
+                        tr.get("jepa_counterfactual_grounding_coef", 0.0)
+                    ),
+                    changed_token_boost=float(tr.get("changed_token_boost", 8.0)),
+                    change_threshold=float(tr.get("change_threshold", 1e-3)),
+                    padding_token_weight=float(
+                        tr.get("padding_token_weight", 0.05)
+                    ),
+                )
+                z = model.tokenizer.encode(b["state"], b["globals"])
+            else:
+                decoded, z = tokenizer(b["state"], b["globals"])
+                loss, metrics = structured_reconstruction_loss(
+                    tokenizer,
+                    decoded,
+                    b["state"],
+                    b["globals"],
+                    b.get("obs"),
+                    b.get("mask"),
+                )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         grad = torch.nn.utils.clip_grad_norm_(
-            tokenizer.parameters(), float(tr.get("grad_clip", 10.0))
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            float(tr.get("grad_clip", 10.0)),
         )
         opt.step()
         sched.step()
+        if objective == "temporal_jepa":
+            progress = step / max(steps, 1)
+            ema_decay = jepa_cfg.ema_decay + progress * (
+                jepa_cfg.ema_end_decay - jepa_cfg.ema_decay
+            )
+            model.update_target(ema_decay)
         if step == 1 or step % log_every == 0 or step == steps:
             diag = {
                 "tok/grad_norm": float(grad),
@@ -239,7 +346,7 @@ def parse_args(argv=None):
     )
     p.add_argument(
         "--exp",
-        default="micro-rts/pretrain_dreamerv4_tokenizer",
+        default="micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer",
         help="experiment config (holds model arch + training:/data: blocks)",
     )
     # All optional overrides — None means 'take it from the config'.

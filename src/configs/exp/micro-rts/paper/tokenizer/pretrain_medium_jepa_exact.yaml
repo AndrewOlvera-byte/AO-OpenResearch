@@ -1,0 +1,98 @@
+run:
+  name: pretrain_medium_jepa_exact
+  seed: 0
+  device: auto
+
+# Continuous structured latents with an engine-aligned discrete interface.
+# Every finite observation field is embedded and reconstructed categorically;
+# the local clock predicts action age (tick - start_tick), then recovers the
+# canonical absolute start tick exactly. The disposable temporal JEPA predictor
+# is grounded through the same decoder at factual and cloned-counterfactual
+# arrivals, so latent predictability cannot hide mechanically incorrect state.
+model:
+  type: structured_v2
+  tokenizer:
+    d_cell: 320
+    d_latent: 320
+    downsample: 2
+    depth: 4
+    n_heads: 8
+    dropout: 0.0
+    max_unit_types: 16
+    max_entities: 128
+    exact_categorical: true
+    # Corpus support: tick<=1998, hp<=10, carried<=25, action age<=199,
+    # eta<=250, remaining<=220, resources<=19, reserved positions<=41.
+    # The configured powers-of-two margins retain exact, non-clipped classes.
+    max_tick: 2048
+    max_hp: 16
+    max_carried: 32
+    max_eta: 256
+    max_remaining: 256
+    max_resources: 32
+    max_reserved_positions: 64
+    exact_consistency_coef: 0.25
+  temporal_jepa:
+    d_model: 512
+    field_dim: 64
+    n_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    # Corpus maximum is 42; 48 removes the old 32-slot overflow tail.
+    max_action_events: 48
+    max_unit_types: 16
+    ema_decay: 0.996
+    ema_end_decay: 1.0
+    raw_prediction: true
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944.h5
+
+training:
+  objective: temporal_jepa
+  amp: true
+  steps: 100000
+  batch: 32
+  seq_len: 1
+  num_workers: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 10.0
+
+  reconstruction_coef: 1.0
+  jepa_factual_coef: 1.0
+  jepa_counterfactual_coef: 1.0
+  jepa_effect_coef: 2.0
+  # Exact decoder grounding is deliberately auxiliary to the EMA latent target:
+  # it enforces mechanics without turning JEPA into only a second autoencoder.
+  jepa_factual_grounding_coef: 0.10
+  jepa_counterfactual_grounding_coef: 0.10
+  changed_token_boost: 8.0
+  change_threshold: 1.0e-3
+  padding_token_weight: 0.05
+  paired_batch_fraction: 0.50
+
+  val_frac: 0.05
+  fixed_val: true
+  fixed_val_seed: 0
+  eval_every: 1000
+  eval_batches: 16
+  warmup_steps: 1000
+  lr_min_frac: 0.05
+  log_every: 100
+  stats_batches: 32
+  out: checkpoints/pretrain_medium_jepa_exact.pt
+  checkpoint:
+    every_steps: 5000
+    keep_last: 3
+    monitor: val/tok/mechanics_score
+    mode: max
+    resume: false
+    resume_from: latest
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: pretrain_medium_jepa_exact
+  tags: [micro-rts, paper, tokenizer, structured-v2, medium, temporal-jepa,
+         exact-categorical, relative-clock, causal-paired, grounded-prediction]
