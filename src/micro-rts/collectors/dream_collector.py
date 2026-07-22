@@ -127,6 +127,13 @@ class _DreamCollectorBase:
                     "state": stream.rows(stream.trans["full_state"]).to(self.device),
                     "globals_": stream.rows(stream.trans["full_globals"]).to(self.device),
                 }
+            if getattr(self.policy, "uses_history_state", False):
+                kwargs["is_first"] = stream.rows(
+                    stream.trans.get(
+                        "is_first",
+                        torch.ones(stream.env.num_envs, dtype=torch.bool),
+                    )
+                ).to(self.device)
             out = self.policy.step(
                 stream.rows(stream.trans["obs"]).to(self.device),
                 stream.rows(probe_mask).to(self.device) if probe_mask is not None else None,
@@ -160,6 +167,13 @@ class _DreamCollectorBase:
                 "state": stream.rows(trans["full_state"]).to(self.device),
                 "globals_": stream.rows(trans["full_globals"]).to(self.device),
             }
+        if getattr(self.policy, "uses_history_state", False):
+            policy_kwargs["is_first"] = stream.rows(
+                trans.get(
+                    "is_first",
+                    torch.zeros(stream.env.num_envs, dtype=torch.bool),
+                )
+            ).to(self.device)
         out = self.policy.step(obs, mask, **policy_kwargs)
         if stream.paired:
             opp_kwargs = {}

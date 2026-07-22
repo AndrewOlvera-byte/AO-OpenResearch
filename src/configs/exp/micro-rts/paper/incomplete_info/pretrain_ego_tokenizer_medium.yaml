@@ -1,0 +1,19 @@
+run: {name: pretrain_incomplete_ego_tokenizer_medium, seed: 0, device: auto}
+model:
+  ego_tokenizer: {d_model: 320, d_latent: 320, depth: 4, n_heads: 8, downsample: 2, n_registers: 8, mask_fraction: 0.35, ema_decay: 0.996}
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+training:
+  full_state_tokenizer_ckpt: checkpoints/pretrain_medium_jepa_exact/best.pt
+  steps: 80000
+  batch: 64
+  num_workers: 8
+  lr: 2.0e-4
+  loss: {reconstruction: 1.0, visibility: 0.1, jepa: 0.25, full_teacher: 0.25}
+  val_frac: 0.05
+  eval_every: 1000
+  checkpoint_every: 5000
+  log_every: 100
+  out: checkpoints/pretrain_incomplete_ego_tokenizer_medium/model.pt
+wandb: {project: ao-openresearch, tags: [micro-rts, incomplete-info, medium, ego-jepa]}

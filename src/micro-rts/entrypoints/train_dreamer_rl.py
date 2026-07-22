@@ -46,20 +46,20 @@ import models.dreamer  # noqa: E402,F401  (registry side effect)
 import models.dreamer_v2  # noqa: E402,F401  (structured agent registry)
 from trainers.DreamerRLTrainer import DreamerRLTrainer  # noqa: E402
 from trainers.StructuredDreamerRLTrainer import StructuredDreamerRLTrainer  # noqa: E402
+from trainers.IncompleteBeliefRLTrainer import IncompleteBeliefRLTrainer  # noqa: E402
 from trainers.BaseTrainer import resolve_device  # noqa: E402
 
 
-def build_trainer(args) -> DreamerRLTrainer | StructuredDreamerRLTrainer:
+def build_trainer(args) -> DreamerRLTrainer | StructuredDreamerRLTrainer | IncompleteBeliefRLTrainer:
     cfg = Config.from_experiment(args.exp)
     overrides = list(args.set)
     if args.mode:
         overrides.append(f"training.dreamer.mode={args.mode}")
     cfg.apply_overrides(overrides)
-    trainer_cls = (
-        StructuredDreamerRLTrainer
-        if cfg.model.get("type") == "structured_dreamer"
-        else DreamerRLTrainer
-    )
+    trainer_cls = {
+        "structured_dreamer": StructuredDreamerRLTrainer,
+        "incomplete_belief_dreamer": IncompleteBeliefRLTrainer,
+    }.get(cfg.model.get("type"), DreamerRLTrainer)
     trainer = trainer_cls(cfg)
     if args.device:
         trainer.device = resolve_device(args.device)

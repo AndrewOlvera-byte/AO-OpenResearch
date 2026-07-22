@@ -1,0 +1,107 @@
+# Frozen incomplete-information v2 world model + phase-2 heads + PMPO.
+#
+# The actor receives only canonical fog history.  The patched full state is
+# surfaced to replay solely for reward/continue/behaviour-head supervision.
+# V2 has no explicit current posterior, so actor collection uses a no-op next-
+# belief query as its documented departure-state approximation.  Imagined
+# candidate actions condition all subsequent v2 transitions.
+
+run:
+  name: incomplete_belief_dreamer_v2_pmpo_bf16_fit
+  seed: 0
+  device: auto
+  ckpt_dir: checkpoints
+  verbose: true
+
+model:
+  type: incomplete_belief_dreamer
+  belief_checkpoint: checkpoints/pretrain_belief_dynamics_medium_v2/best.pt
+  checkpoint_root: .
+  agent_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 1.0e-4
+  grad_clip: 10.0
+  sample_intent: true
+  flow_steps: 1
+  actor_critic:
+    dec_channels: 128
+    summary_hidden: 512
+    critic_hidden: [512, 512]
+    reward_bins: 255
+    critic_bins: 255
+    imagine_horizon: 4
+    imagine_flow_steps: 1
+    gamma: 0.997
+    lam: 0.95
+    critic_ema: 0.98
+    pmpo_alpha: 0.5
+    prior_kl_coef: 0.3
+    entropy_coef: 0.0
+
+data: {}
+
+training:
+  iters: 3000
+  dreamer:
+    mode: imagination
+    # Required by the shared trainer contract; model construction uses the
+    # model.belief_checkpoint field above.
+    init_from: checkpoints/pretrain_belief_dynamics_medium_v2/best.pt
+    amp: true
+    buffer_device: cpu
+    num_envs: 2
+    horizon: 16
+    seq_len: 16
+    batch_seqs: 1
+    buffer_capacity: 1024
+    warmup_steps: 128
+    train_ratio: 0.0625
+    imagine_horizon: 4
+    imagine_seeds: 1
+
+    # First fit the phase-2 scalar and action heads in the exact structured
+    # tokenizer latent space.  At the gate, copy the BC prior into the actor.
+    agent_warmup_updates: 250
+    world_finetune_after: 1000000000
+    agent_gate:
+      smoothing: 0.05
+      max_reward_mae: 5.0
+      min_continue_acc: 0.90
+    agent_heads:
+      data: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+      seq_len: 8
+      batch_seqs: 2
+      num_workers: 1
+      reward_coef: 1.0
+      continue_coef: 1.0
+      prior_bc_coef: 1.0
+      opponent_bc_coef: 0.5
+      online_coef: 0.25
+
+    bots: [randomBiasedAI, workerRushAI]
+    map_path: maps/16x16/basesWorkers16x16.xml
+    max_steps: 2000
+    reward: dense_shaped
+
+  console:
+    every_iters: 10
+  eval:
+    enabled: true
+    every_iters: 250
+    games: 1
+    envs_per_bot: 1
+    max_steps: 500
+    bots: [randomBiasedAI, workerRushAI]
+    greedy: true
+  checkpoint:
+    every_iters: 100
+    keep_last: 3
+    monitor: eval/win_rate
+    mode: max
+
+wandb:
+  project: ao-openresearch
+  entity: null
+  run_name: ${run.name}
+  tags: [micro-rts, incomplete-info, belief-dynamics-v2, dreamer, pmpo,
+         frozen-world-model, fog-history, planning-ablation]

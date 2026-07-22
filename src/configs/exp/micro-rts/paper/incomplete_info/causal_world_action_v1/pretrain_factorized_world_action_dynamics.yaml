@@ -1,0 +1,71 @@
+run:
+  name: pretrain_causal_world_action_dynamics_v1
+  seed: 0
+  device: auto
+
+model:
+  type: causal_world_action_dynamics
+  factorized_dynamics:
+    d_model: 512
+    d_latent: 320
+    n_heads: 8
+    depth: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    sample_steps: 4
+    n_self_tokens: 8
+    n_opponent_tokens: 8
+    n_static_tokens: 4
+    n_interaction_tokens: 8
+    n_opponent_plan_tokens: 8
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+  paired_batch_fraction: 1.0
+  h5_cache_mb: 256
+
+training:
+  # Produced by pretrain_world_action_encoder.py. Dynamics starts only after
+  # predictive-state promotion, not merely after reaching a checkpoint count.
+  belief_encoder_ckpt: checkpoints/pretrain_causal_world_action_encoder_v1/best.pt
+  source_intent_ckpt: checkpoints/pretrain_opponent_intent_prior_medium_v3/model.pt
+  seq_len: 64
+  steps: 120000
+  batch: 4
+  num_workers: 8
+  prefetch_factor: 3
+  persistent_workers: true
+  pin_memory: true
+  amp: true
+  lr: 1.0e-4
+  warmup_steps: 2000
+  lr_min_frac: 0.05
+  weight_decay: 1.0e-4
+  grad_clip: 5.0
+  loss:
+    flow_transition: 1.0
+    multi_horizon: 1.0
+    self_inverse: 0.5
+    opponent_inverse: 0.5
+    events: 0.5
+    reward: 0.5
+    return: 0.5
+    continue: 0.1
+    counterfactual: 1.0
+    counterfactual_effect: 1.0
+    counterfactual_preference: 0.5
+    reconstruction: 0.0
+  val_frac: 0.05
+  eval_every: 1000
+  eval_batches: 16
+  checkpoint_every: 2500
+  log_every: 25
+  monitor: world_action_dynamics/total
+  out: checkpoints/pretrain_causal_world_action_dynamics_v1/model.pt
+
+wandb:
+  project: ao-openresearch
+  run_name: pretrain_causal_world_action_dynamics_v1
+  tags: [micro-rts, incomplete-info, causal-world-action-v1, factorized-flow,
+         intrinsic, extrinsic, interaction, reward-aware, bf16, flash-sdpa]

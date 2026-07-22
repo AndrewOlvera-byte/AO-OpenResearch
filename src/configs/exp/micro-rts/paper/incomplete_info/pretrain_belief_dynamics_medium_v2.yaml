@@ -1,0 +1,59 @@
+run: {name: pretrain_belief_dynamics_medium_v2, seed: 0, device: auto}
+model:
+  # The endpoint branch is trained as a direct noise-to-belief map at tau=0.
+  # Deploy it the same way; v1's 4-step integration was not monotonic in eval.
+  belief_dynamics: {d_model: 512, depth: 4, n_heads: 8, sample_steps: 1}
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+training:
+  # Preserve v1's useful state prior but start a fresh optimizer and selection run.
+  init_from: checkpoints/pretrain_belief_dynamics_medium_v1/best.pt
+  intent_prior_ckpt: checkpoints/pretrain_opponent_intent_prior_medium_v3/model.pt
+  mechanics_stats_ckpt: checkpoints/pretrain_flow_dynamics_medium_jepa_exact_overshoot_200k/best.pt
+  seq_len: 64
+  steps: 60000
+  batch: 2
+  num_workers: 8
+  lr: 3.0e-5
+  warmup_steps: 500
+  lr_min_frac: 0.1
+  grad_clip: 5.0
+  # Ranking had negligible scale in v1 and omitted self action entirely.
+  loss: {flow: 1.0, prior: 1.0, grounding: 0.1, history_rank: 5.0, intent_rank: 5.0, action_rank: 10.0}
+  condition_margin: 0.02
+  rank_anchors: 4
+  # Hidden occupied cells carry the planning-relevant uncertainty. Visible state
+  # remains grounded, but no longer overwhelms rare hidden entities.
+  visible_boost: 1.0
+  occupied_boost: 4.0
+  hidden_occupied_boost: 8.0
+  val_frac: 0.05
+  eval_seed: 1729
+  eval_every: 1000
+  eval_batches: 32
+  checkpoint_every: 2500
+  log_every: 50
+  monitor: belief_dynamics/total
+  log_metrics:
+    - belief_dynamics/total
+    - belief_dynamics/flow
+    - belief_dynamics/prior_latent
+    - belief_dynamics/prior_grounding
+    - belief_dynamics/history_rank
+    - belief_dynamics/intent_rank
+    - belief_dynamics/action_rank
+    - belief_dynamics/history_advantage
+    - belief_dynamics/intent_advantage
+    - belief_dynamics/action_advantage
+    - belief_dynamics/visible_exact_cell
+    - belief_dynamics/hidden_exact_cell
+    - belief_dynamics/hidden_occupied_exact
+    - belief_dynamics/exact_globals
+    - belief_dynamics/tok/exact_occupied_cell
+    - belief_dynamics/tok/mechanics_score
+  out: checkpoints/pretrain_belief_dynamics_medium_v2/model.pt
+wandb:
+  project: ao-openresearch
+  run_name: pretrain_belief_dynamics_medium_v2
+  tags: [micro-rts, incomplete-info, medium, belief-dynamics-v2, deterministic-val, action-ranking, hidden-occupied]

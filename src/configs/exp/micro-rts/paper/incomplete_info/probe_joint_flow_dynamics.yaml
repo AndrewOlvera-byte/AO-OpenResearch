@@ -1,0 +1,28 @@
+run: {name: probe_incomplete_joint_flow, seed: 0, device: auto}
+model:
+  ego_tokenizer: {d_model: 128, d_latent: 320, depth: 2, n_heads: 8, downsample: 2, n_registers: 8}
+  self_action_tokenizer: {d_model: 128, d_latent: 320, field_dim: 32, n_heads: 8, max_action_events: 48}
+  opponent_tokenizer: {d_model: 128, d_latent: 320, field_dim: 32, n_heads: 8, depth: 2, max_action_events: 48, n_plan_tokens: 8, horizons: [0, 1, 2, 4, 8, 16]}
+  history: {d_model: 256, depth: 3, n_heads: 8, n_registers: 8, context_length: 32, time_every: 1}
+  flow: {d_model: 256, depth: 3, n_heads: 8, sample_steps: 4}
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+training:
+  mechanics_ckpt: checkpoints/pretrain_flow_dynamics_medium_jepa_exact_overshoot_200k/best.pt
+  ego_tokenizer_ckpt: checkpoints/probe_incomplete_ego_tokenizer/best.pt
+  self_action_tokenizer_ckpt: checkpoints/probe_incomplete_self_action_tokenizer/best.pt
+  opponent_tokenizer_ckpt: checkpoints/probe_opponent_plan_tokenizer/best.pt
+  seq_len: 32
+  steps: 25000
+  batch: 4
+  num_workers: 8
+  lr: 2.0e-4
+  stats_batches: 16
+  loss: {flow: 1.0, grounding: 0.25, opponent_event: 0.5, future_jepa: 0.25}
+  val_frac: 0.02
+  eval_every: 500
+  checkpoint_every: 1000
+  log_every: 25
+  out: checkpoints/probe_incomplete_joint_flow/model.pt
+wandb: {project: ao-openresearch, tags: [micro-rts, incomplete-info, probe, joint-flow]}

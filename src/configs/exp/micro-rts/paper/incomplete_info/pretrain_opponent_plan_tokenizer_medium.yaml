@@ -1,0 +1,20 @@
+run: {name: pretrain_opponent_plan_tokenizer_medium, seed: 0, device: auto}
+model:
+  opponent_tokenizer: {d_model: 512, d_latent: 320, field_dim: 64, n_heads: 8, depth: 3, max_action_events: 48, n_plan_tokens: 8, horizons: [0, 1, 2, 4, 8, 16]}
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+training:
+  full_state_tokenizer_ckpt: checkpoints/pretrain_medium_jepa_exact/best.pt
+  seq_len: 32
+  steps: 100000
+  batch: 8
+  num_workers: 8
+  lr: 2.0e-4
+  loss: {event: 1.0, future_state: 0.5}
+  val_frac: 0.05
+  eval_every: 1000
+  checkpoint_every: 5000
+  log_every: 100
+  out: checkpoints/pretrain_opponent_plan_tokenizer_medium/model.pt
+wandb: {project: ao-openresearch, tags: [micro-rts, incomplete-info, medium, opponent-plan]}

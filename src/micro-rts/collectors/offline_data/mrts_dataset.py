@@ -140,6 +140,59 @@ _TASK_FIELDS = {
         "done",
         "is_first",
     ),
+    # Incomplete-information v1 tasks add their observation fields dynamically
+    # from ``observation_mode`` below.  The model-facing keys are always
+    # ``local_obs`` and ``local_visibility`` so losses never branch on storage
+    # schema names.
+    "incomplete_obs_tokenizer": (
+        "state",
+        "globals",
+        "is_first",
+    ),
+    "incomplete_action_tokenizer": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "is_first",
+    ),
+    "incomplete_opponent_tokenizer": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "opponent_action",
+        "is_first",
+    ),
+    "incomplete_dynamics": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "reward",
+        "done",
+        "is_first",
+    ),
+    "incomplete_dynamics_paired": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "counterfactual_action",
+        "counterfactual_opponent_action",
+        "counterfactual_next_state",
+        "counterfactual_next_globals",
+        "counterfactual_valid",
+        "reward",
+        "done",
+        "is_first",
+    ),
 }
 
 
@@ -161,6 +214,7 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         split="train",
         split_seed=0,
         h5_cache_mb=64,
+        observation_mode="ego",
     ):
         import h5py
 
@@ -175,7 +229,21 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         self.seq_len = int(seq_len)
         self.task = task
         self.stride = max(1, int(stride))
+        self.observation_mode = str(observation_mode)
+        self.incomplete_information = task.startswith("incomplete_")
+        if self.observation_mode not in ("ego", "oracle_full"):
+            raise ValueError(
+                "observation_mode must be 'ego' or 'oracle_full', got "
+                f"{self.observation_mode!r}"
+            )
         self.fields = _TASK_FIELDS[task]
+        if self.incomplete_information:
+            local_fields = (
+                ("ego_obs", "ego_visibility")
+                if self.observation_mode == "ego"
+                else ("obs",)
+            )
+            self.fields = (*self.fields, *local_fields)
         self._locking = locking
         self._h5_cache_bytes = int(h5_cache_mb) * 1024 * 1024
         self._f = None  # lazy, per-worker (see the module docstring)
@@ -230,6 +298,25 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
                         "with --counterfactual-frac > 0; missing fields "
                         f"{missing}"
                     )
+            if self.incomplete_information:
+                missing = sorted(set(requested_fields) - set(self.fields))
+                if missing:
+                    raise ValueError(
+                        f"{self.path}: task={task!r} with observation_mode="
+                        f"{self.observation_mode!r} is missing fields {missing}"
+                    )
+                if self.observation_mode == "ego":
+                    if not bool(self.attrs.get("has_ego_obs", False)):
+                        raise ValueError(f"{self.path}: has_ego_obs is not true")
+                    if not bool(self.attrs.get("fog_augmentation_complete", False)):
+                        raise ValueError(
+                            f"{self.path}: fog augmentation is not complete"
+                        )
+                # New temporal models must never carry history across an
+                # autoreset inside one stored collection segment.
+                all_is_first = f["is_first"][:].astype(bool)
+            else:
+                all_is_first = None
 
         # Stores collected with the terminal-frame patch carry the true terminal
         # arrival obs sparsely at done rows; __getitem__ splices them in.
@@ -268,11 +355,23 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         starts, traj_of = [], []
         for tj in np.nonzero(keep)[0]:
             s, L = int(start[tj]), int(length[tj])
-            if L < self.seq_len:
-                continue
-            offs = np.arange(0, L - self.seq_len + 1, self.stride, dtype=np.int64)
-            starts.append(s + offs)
-            traj_of.append(np.full(len(offs), tj, dtype=np.int64))
+            spans = [(s, s + L)]
+            if all_is_first is not None:
+                boundaries = np.flatnonzero(all_is_first[s + 1 : s + L]) + s + 1
+                cuts = np.concatenate(([s], boundaries, [s + L]))
+                spans = list(zip(cuts[:-1], cuts[1:]))
+            for span_start, span_end in spans:
+                span_len = int(span_end - span_start)
+                if span_len < self.seq_len:
+                    continue
+                offs = np.arange(
+                    0,
+                    span_len - self.seq_len + 1,
+                    self.stride,
+                    dtype=np.int64,
+                )
+                starts.append(int(span_start) + offs)
+                traj_of.append(np.full(len(offs), tj, dtype=np.int64))
         self._win_start = np.concatenate(starts) if starts else np.empty(0, np.int64)
         self.traj_idx = np.concatenate(traj_of) if traj_of else np.empty(0, np.int64)
 
@@ -307,7 +406,11 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         s = int(self._win_start[idx])
         e = s + self.seq_len
 
-        obs = f["obs"][s:e].astype(np.float32) if "obs" in self.fields else None
+        obs = (
+            f["obs"][s:e].astype(np.float32)
+            if "obs" in self.fields and not self.incomplete_information
+            else None
+        )
         mask = f["mask"][s:e] if "mask" in self.fields else None
         needs_reset_alignment = self.has_terminal_obs and (
             obs is not None or mask is not None
@@ -363,6 +466,17 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
             )
         if "is_first" in self.fields:
             out["is_first"] = torch.from_numpy(is_first)
+        if self.incomplete_information:
+            if self.observation_mode == "ego":
+                local_obs = f["ego_obs"][s:e].astype(np.float32)
+                local_visibility = f["ego_visibility"][s:e].astype(bool)
+            else:
+                local_obs = f["obs"][s:e].astype(np.float32)
+                local_visibility = np.ones(
+                    (self.seq_len, 1, *self.grid_hw), dtype=bool
+                )
+            out["local_obs"] = torch.from_numpy(local_obs)
+            out["local_visibility"] = torch.from_numpy(local_visibility)
         for name in ("state", "next_state", "globals", "next_globals"):
             if name in self.fields:
                 out[name] = torch.from_numpy(f[name][s:e].astype(np.int64))

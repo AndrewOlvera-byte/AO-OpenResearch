@@ -37,6 +37,10 @@ def run_match_eval(policy, env, env_bots, games, max_steps, device, deterministi
                 "state": trans["full_state"].to(device),
                 "globals_": trans["full_globals"].to(device),
             }
+        if getattr(policy, "uses_history_state", False):
+            kwargs["is_first"] = trans.get(
+                "is_first", torch.zeros(env.num_envs, dtype=torch.bool)
+            ).to(device)
         out = policy.step(
             trans["obs"].to(device), mask, deterministic=deterministic, **kwargs
         )
