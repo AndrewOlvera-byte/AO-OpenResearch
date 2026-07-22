@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from core.registry import register
+
 from .encoder import masked_action_pool, split_branches
 
 
@@ -81,15 +83,16 @@ def semantic_transition_target(state, next_state, globals_, next_globals, downsa
     return torch.cat((pooled, resource), dim=-1)
 
 
+@register("loss", "predictive_belief")
 def predictive_belief_loss(
     model,
     batch,
     *,
-    jepa_coef=1.0,
+    future_jepa_coef=1.0,
     variance_coef=0.05,
-    inverse_coef=0.5,
-    opponent_coef=0.5,
-    event_coef=0.5,
+    self_inverse_coef=0.5,
+    opponent_plan_coef=0.5,
+    events_coef=0.5,
     reward_coef=0.5,
     return_coef=0.5,
     continue_coef=0.1,
@@ -202,11 +205,11 @@ def predictive_belief_loss(
         effect_cosine = (cosine * active).sum() / active_denom
 
     total = (
-        float(jepa_coef) * jepa
+        float(future_jepa_coef) * jepa
         + float(variance_coef) * variance
-        + float(inverse_coef) * inverse
-        + float(opponent_coef) * opponent
-        + float(event_coef) * event
+        + float(self_inverse_coef) * inverse
+        + float(opponent_plan_coef) * opponent
+        + float(events_coef) * event
         + float(reward_coef) * reward_loss
         + float(return_coef) * return_loss
         + float(continue_coef) * continue_loss
@@ -227,5 +230,216 @@ def predictive_belief_loss(
         "world_action_encoder/counterfactual_effect": counterfactual_effect.detach(),
         "world_action_encoder/counterfactual_effect_cosine": effect_cosine.detach(),
         "world_action_encoder/latent_rms": online["tokens"].float().square().mean().sqrt().detach(),
+    }
+    return total, metrics
+
+
+def _static_zeroed(delta, sizes):
+    """Zero the static branch of a branch-factorized tensor (static is immutable)."""
+    parts = split_branches(delta, sizes)
+    parts["static"] = torch.zeros_like(parts["static"])
+    return torch.cat(tuple(parts.values()), dim=-2)
+
+
+@register("loss", "causal_world_action_dynamics")
+def factorized_world_action_dynamics_loss(
+    model,
+    batch,
+    *,
+    flow_transition_coef=1.0,
+    multi_horizon_coef=1.0,
+    self_inverse_coef=0.5,
+    opponent_inverse_coef=0.5,
+    events_coef=0.5,
+    reward_coef=0.5,
+    return_coef=0.5,
+    continue_coef=0.1,
+    counterfactual_coef=1.0,
+    counterfactual_effect_coef=1.0,
+    counterfactual_preference_coef=0.5,
+    reconstruction_coef=0.0,
+    horizons=(1, 2, 4),
+):
+    """Composed transition loss for ``FactorizedWorldActionDynamics``.
+
+    Trains the intrinsic/extrinsic/interaction flow to transport the frozen
+    stage-1 belief from ``b_t`` to ``b_{t+1}`` under the simultaneous ego action
+    and opponent plan, plus readout heads (events / scalars / inverse) decoded
+    from the *predicted* next belief and counterfactual objectives.  Emits
+    ``world_action_dynamics/*`` metrics (``monitor: world_action_dynamics/total``).
+    """
+    dynamics = model.dynamics
+    sizes = dynamics.cfg.branch_sizes
+    downsample = model.ego_tokenizer.cfg.downsample
+    discount = float(model.belief_cfg.discount)
+
+    encoded = model(batch)  # frozen tokenization (no grad)
+    belief, action, valid, plan = (
+        encoded["belief"],
+        encoded["action"],
+        encoded["valid"],
+        encoded["plan"],
+    )
+    zero = belief.new_zeros(())
+    # Aligned transition window t -> t+1 with an opponent plan available at t.
+    length = min(plan.shape[1], belief.shape[1] - 1)
+    departure = belief[:, :length]
+    next_belief = belief[:, 1:length + 1]
+    ego_action = action[:, :length]
+    plan_t = plan[:, :length]
+    state = batch["state"][:, :length]
+    next_state = batch["next_state"][:, :length]
+    globals_ = batch["globals"][:, :length]
+    next_globals = batch["next_globals"][:, :length]
+
+    # --- flow-matching transition (rectified flow on branch deltas) ----------
+    delta = _static_zeroed(next_belief - departure, sizes)
+    noise = _static_zeroed(torch.randn_like(delta), sizes)
+    tau = torch.rand(departure.shape[:-2], device=delta.device, dtype=delta.dtype)
+    interpolated = (1.0 - tau[..., None, None]) * noise + tau[..., None, None] * delta
+    velocity = dynamics.velocity(interpolated, tau, departure, ego_action, plan_t)
+    flow_transition = F.smooth_l1_loss(velocity.float(), (delta - noise).float())
+
+    # --- single-step prediction reused by the readouts / counterfactuals -----
+    predicted = dynamics.transition(departure, ego_action, plan_t)
+    predicted_parts = split_branches(predicted, sizes)
+    source_parts = split_branches(departure, sizes)
+
+    # --- multi-horizon rollout consistency (truncated BPTT) ------------------
+    # The rollout prefix runs under no_grad; only the final transition at each
+    # horizon carries gradient, which keeps the retained graph (and memory)
+    # bounded to a single flow integration regardless of horizon.
+    multi_parts = []
+    for horizon in horizons:
+        span = length - horizon + 1
+        if span < 1:
+            continue
+        rolled = belief[:, :span]
+        with torch.no_grad():
+            for step in range(horizon - 1):
+                rolled = dynamics.transition(
+                    rolled, action[:, step:step + span], plan[:, step:step + span]
+                )
+        rolled = dynamics.transition(
+            rolled,
+            action[:, horizon - 1:horizon - 1 + span],
+            plan[:, horizon - 1:horizon - 1 + span],
+        )
+        multi_parts.append(_jepa(rolled, belief[:, horizon:horizon + span]))
+    multi_horizon = torch.stack(multi_parts).mean() if multi_parts else zero
+
+    # --- inverse heads off (b_t, predicted b_{t+1}) --------------------------
+    self_inverse = _jepa(
+        model.self_inverse(
+            torch.cat(
+                (source_parts["self"].mean(-2), predicted_parts["self"].mean(-2)), dim=-1
+            )
+        ),
+        masked_action_pool(ego_action, valid[:, :length]),
+    )
+    opponent_inverse = _jepa(
+        model.opponent_inverse(
+            torch.cat((source_parts["opponent"], predicted_parts["opponent"]), dim=-1)
+        ),
+        plan_t,
+    )
+
+    # --- events / scalars off the predicted next belief ----------------------
+    factual_target = semantic_transition_target(
+        state, next_state, globals_, next_globals, downsample
+    )
+    event_prediction = model.event_head(predicted_parts["interaction"])
+    events = _sparse_event_loss(event_prediction, factual_target)
+
+    scalar = model.scalar_predictions(predicted)
+    reward_loss = F.smooth_l1_loss(scalar[..., 0], batch["reward"][:, :length])
+    returns = _window_sum(batch["reward"], 1, discount)[:, :length]
+    return_loss = F.smooth_l1_loss(scalar[..., 1], returns)
+    continue_loss = F.binary_cross_entropy_with_logits(
+        scalar[..., 2], batch["cont"][:, :length]
+    )
+
+    # --- counterfactual action intervention ----------------------------------
+    counterfactual = counterfactual_effect = counterfactual_preference = zero
+    effect_cosine = zero
+    if "counterfactual_valid" in batch:
+        cf_action, _ = model.encode_actions(batch, "counterfactual_action")
+        cf_predicted = dynamics.transition(departure, cf_action[:, :length], plan_t)
+        cf_parts = split_branches(cf_predicted, sizes)
+        cf_prediction = model.event_head(cf_parts["interaction"])
+        cf_target = semantic_transition_target(
+            state,
+            batch["counterfactual_next_state"][:, :length],
+            globals_,
+            batch["counterfactual_next_globals"][:, :length],
+            downsample,
+        )
+        cf_valid = batch["counterfactual_valid"][:, :length].float()
+        counterfactual = _sparse_event_loss(cf_prediction, cf_target, cf_valid)
+
+        predicted_effect = _event_values(cf_prediction).float() - _event_values(
+            event_prediction
+        ).float()
+        target_effect = cf_target.float() - factual_target.float()
+        patch_weight = 0.05 + 8.0 * (target_effect.abs().amax(-1) > 1e-6).float()
+        effect_per = (
+            (predicted_effect - target_effect).square().mean(-1) * patch_weight
+        ).sum(-1) / patch_weight.sum(-1)
+        active = cf_valid * (target_effect.flatten(-2).norm(dim=-1) > 1e-5).float()
+        denom = active.sum().clamp_min(1.0)
+        cosine = F.cosine_similarity(
+            predicted_effect.flatten(-2), target_effect.flatten(-2), dim=-1, eps=1e-8
+        )
+        direction = ((1.0 - cosine) * active).sum() / denom
+        counterfactual_effect = (effect_per * active).sum() / denom + direction
+        effect_cosine = (cosine * active).sum() / denom
+
+        # Preference: predicted return must order factual vs counterfactual the
+        # same way the realized resource outcome does.
+        cf_scalar = model.scalar_predictions(cf_predicted)
+        factual_gain = (next_globals[..., 1:3] - globals_[..., 1:3]).float().sum(-1)
+        cf_gain = (
+            batch["counterfactual_next_globals"][:, :length, 1:3] - globals_[..., 1:3]
+        ).float().sum(-1)
+        target_sign = torch.sign(cf_gain - factual_gain)
+        pred_diff = cf_scalar[..., 1] - scalar[..., 1]
+        pref_active = cf_valid * (target_sign.abs() > 0).float()
+        counterfactual_preference = (
+            F.relu(0.1 - target_sign * pred_diff) * pref_active
+        ).sum() / pref_active.sum().clamp_min(1.0)
+
+    reconstruction = zero
+    if reconstruction_coef:
+        reconstruction = _jepa(predicted, next_belief)
+
+    total = (
+        float(flow_transition_coef) * flow_transition
+        + float(multi_horizon_coef) * multi_horizon
+        + float(self_inverse_coef) * self_inverse
+        + float(opponent_inverse_coef) * opponent_inverse
+        + float(events_coef) * events
+        + float(reward_coef) * reward_loss
+        + float(return_coef) * return_loss
+        + float(continue_coef) * continue_loss
+        + float(counterfactual_coef) * counterfactual
+        + float(counterfactual_effect_coef) * counterfactual_effect
+        + float(counterfactual_preference_coef) * counterfactual_preference
+        + float(reconstruction_coef) * reconstruction
+    )
+    metrics = {
+        "world_action_dynamics/total": total.detach(),
+        "world_action_dynamics/flow_transition": flow_transition.detach(),
+        "world_action_dynamics/multi_horizon": multi_horizon.detach(),
+        "world_action_dynamics/self_inverse": self_inverse.detach(),
+        "world_action_dynamics/opponent_inverse": opponent_inverse.detach(),
+        "world_action_dynamics/events": events.detach(),
+        "world_action_dynamics/reward": reward_loss.detach(),
+        "world_action_dynamics/return": return_loss.detach(),
+        "world_action_dynamics/continue": continue_loss.detach(),
+        "world_action_dynamics/counterfactual": counterfactual.detach(),
+        "world_action_dynamics/counterfactual_effect": counterfactual_effect.detach(),
+        "world_action_dynamics/counterfactual_effect_cosine": effect_cosine.detach(),
+        "world_action_dynamics/counterfactual_preference": counterfactual_preference.detach(),
+        "world_action_dynamics/reconstruction": reconstruction.detach(),
     }
     return total, metrics

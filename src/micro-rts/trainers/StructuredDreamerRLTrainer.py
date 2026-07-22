@@ -9,7 +9,7 @@ import torch
 
 from collectors.dream_collector import DreamCollector
 from collectors.offline_data import build_mrts_loader, cycle, to_device
-from core.registry import build
+from core.registry import build, register
 from environments.dream_env import DreamEnv
 from environments.microrts_env import EnvConfig, MicroRTSVecEnv
 from evaluation.matchplay import build_report, run_match_eval
@@ -40,6 +40,7 @@ class _OptimizerBundle:
                 self.optimizers[name].load_state_dict(value)
 
 
+@register("trainer", "structured_dreamer")
 class StructuredDreamerRLTrainer(BaseTrainer, AbstractDreamerTrainer):
     """Phase-2 heads + PMPO imagination + guarded real-replay WM adaptation."""
 

@@ -25,8 +25,8 @@ from models.dreamer_v2.dynamics import (
     structured_dreamer4_loss,
     structured_flow_loss,
 )
-from entrypoints.migrate_structured_none_actions import main as migrate_none_actions
-from entrypoints.compare_structured_tokenizers import evaluate_tokenizer_batch
+from entrypoints.util.migrate_structured_none_actions import main as migrate_none_actions
+from entrypoints.util.compare_structured_tokenizers import evaluate_tokenizer_batch
 from entrypoints.train_dreamer_dynamics import load_pretrained_action_tokenizer
 from entrypoints.pretrain_common import make_lr_scheduler
 

@@ -8,7 +8,8 @@ front ends while learning a new predictive state for planning.
 from .config import FactorizedDynamicsConfig, PredictiveBeliefConfig
 from .dynamics import FactorizedWorldActionDynamics
 from .encoder import PredictiveBeliefPretrainer, WorldActionBeliefEncoder
-from .losses import predictive_belief_loss
+from .losses import factorized_world_action_dynamics_loss, predictive_belief_loss
+from .module import WorldActionDynamicsModule
 
 __all__ = [
     "FactorizedDynamicsConfig",
@@ -16,5 +17,7 @@ __all__ = [
     "PredictiveBeliefConfig",
     "PredictiveBeliefPretrainer",
     "WorldActionBeliefEncoder",
+    "WorldActionDynamicsModule",
+    "factorized_world_action_dynamics_loss",
     "predictive_belief_loss",
 ]

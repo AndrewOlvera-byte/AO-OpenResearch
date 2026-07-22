@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from core.registry import register
 from models.dreamer_v2 import structured_reconstruction_loss
 
 from .ego_tokenizer import OBS_GROUPS, EgoTokenizerPretrainer
@@ -52,6 +53,7 @@ def event_reconstruction_loss(decoder, logits, events, valid, prefix="events"):
     return total, metrics
 
 
+@register("loss", "ego_tokenizer")
 def ego_tokenizer_loss(
     model: EgoTokenizerPretrainer,
     batch: dict,
@@ -141,6 +143,7 @@ def ego_tokenizer_loss(
     return total, metrics
 
 
+@register("loss", "self_action_tokenizer")
 def self_action_tokenizer_loss(
     model,
     full_state_tokenizer,
@@ -183,6 +186,7 @@ def self_action_tokenizer_loss(
     return total, metrics
 
 
+@register("loss", "opponent_plan_tokenizer")
 def opponent_plan_tokenizer_loss(
     model,
     full_state_tokenizer,
@@ -220,6 +224,7 @@ def opponent_plan_tokenizer_loss(
     return total, metrics
 
 
+@register("loss", "opponent_intent_prior")
 def opponent_intent_prior_loss(
     model,
     batch,
@@ -346,6 +351,7 @@ def opponent_intent_prior_loss(
     return total, metrics
 
 
+@register("loss", "belief_dynamics")
 def belief_dynamics_loss(
     model,
     batch,
@@ -735,6 +741,7 @@ def belief_dynamics_loss(
     return total, metrics
 
 
+@register("loss", "joint_flow_world_model")
 def joint_flow_world_model_loss(
     model,
     batch,

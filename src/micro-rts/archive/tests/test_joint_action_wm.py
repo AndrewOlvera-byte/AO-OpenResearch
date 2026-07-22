@@ -170,7 +170,7 @@ def test_generation_paths_accept_opponent_stream():
 
 
 def test_counterfactual_probe_reports_gaps():
-    from entrypoints.probes import counterfactual_action_probe
+    from entrypoints.util.probes import counterfactual_action_probe
 
     torch.manual_seed(0)
     m = _model()
@@ -193,7 +193,7 @@ def test_counterfactual_probe_reports_gaps():
 
 
 def test_issued_cell_pooling_alignment():
-    from entrypoints.probes import _issued_latent_cells
+    from entrypoints.util.probes import _issued_latent_cells
 
     B, T, ctx = 1, 4, 2
     a = torch.zeros(B, T, 64, 7, dtype=torch.long)     # 8x8 grid -> 2x2 latent

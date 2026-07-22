@@ -13,7 +13,7 @@ from collectors.offline_data.fog_of_war import (
 )
 
 
-_SCRIPT = Path(__file__).parents[1] / "entrypoints" / "augment_fog_observations.py"
+_SCRIPT = Path(__file__).parents[1] / "entrypoints" / "util" / "augment_fog_observations.py"
 _SPEC = importlib.util.spec_from_file_location("augment_fog_observations", _SCRIPT)
 augment_fog = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None

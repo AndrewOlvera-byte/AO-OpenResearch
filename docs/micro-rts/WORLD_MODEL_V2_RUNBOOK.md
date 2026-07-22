@@ -87,7 +87,7 @@ collection time and needs no migration.
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
-    --exp micro-rts/pretrain_structured_tokenizer_v2'
+    --exp micro-rts/tokenizer/structured_v2/pretrain_structured_tokenizer_v2'
 ```
 
 The default latent frame is 64 learned 8x8 spatial tokens, up to 128 unpooled
@@ -100,7 +100,7 @@ player resources, and legality-mask metrics. Legacy-plane accuracy is secondary.
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
-    --exp micro-rts/pretrain_structured_tokenizer_v2_oracle'
+    --exp micro-rts/tokenizer/structured_v2/pretrain_structured_tokenizer_v2_oracle'
 ```
 
 The oracle retains all 256 spatial tokens plus 128 entity and three global
@@ -112,7 +112,7 @@ whether failures belong to 8x8 compression; it is not the intended final model.
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_action_tokenizer.py \
-    --exp micro-rts/pretrain_structured_action_tokenizer_v2'
+    --exp micro-rts/tokenizer/structured_v2/pretrain_structured_action_tokenizer_v2'
 ```
 
 This keeps one 512-D token for each of the 32 sparse event slots. It does not
@@ -128,7 +128,7 @@ discarded downstream.
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-    --exp micro-rts/pretrain_structured_dynamics_v2'
+    --exp micro-rts/dynamics/structured_v2/core/pretrain_structured_dynamics_v2'
 ```
 
 Each sample is a conventional causal token sequence:
@@ -155,7 +155,7 @@ For the paper-faithful Dreamer-4 objective A/B experiment, run:
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-    --exp micro-rts/pretrain_structured_dynamics_v2_dreamer4'
+    --exp micro-rts/dynamics/structured_v2/dreamer4/pretrain_structured_dynamics_v2_dreamer4'
 ```
 
 That experiment partitions batch rows between empirical and bootstrap training,
@@ -171,11 +171,11 @@ the same 50M transition core, 32 action tokens, and a 160k-step budget:
 ```bash
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-    --exp micro-rts/pretrain_structured_dynamics_v2_causal_paired_action_scratch'
+    --exp micro-rts/dynamics/structured_v2/causal_paired/pretrain_structured_dynamics_v2_causal_paired_action_scratch'
 
 docker exec -i ao-research bash -lc 'cd /workspace && \
   python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-    --exp micro-rts/pretrain_structured_dynamics_v2_causal_paired_action_pretrained'
+    --exp micro-rts/dynamics/structured_v2/causal_paired/pretrain_structured_dynamics_v2_causal_paired_action_pretrained'
 ```
 
 Do not compare the pretrained treatment only to the legacy summed encoder: the

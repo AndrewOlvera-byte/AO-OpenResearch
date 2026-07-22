@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from core.registry import register
+
 from .attention import CrossBlock, TransformerBlock
 from .config import FactorizedDynamicsConfig
 from .encoder import BRANCHES, split_branches
@@ -91,10 +93,17 @@ class FactorizedWorldActionDynamics(nn.Module):
         }
         return torch.cat(tuple(pieces[name] for name in BRANCHES), dim=-2)
 
-    @torch.no_grad()
-    def sample(self, departure, ego_action, opponent_plan, steps=None, noise=None):
+    def transition(self, departure, ego_action, opponent_plan, steps=None, noise=None):
+        """Integrate the flow to the predicted next belief (gradient-enabled).
+
+        Euler-samples the velocity field from ``noise`` (default N(0,1)) to a
+        branch delta, adds it to ``departure``, and copies the static branch
+        through exactly once.  ``sample`` is the ``no_grad`` wrapper used at
+        inference; training losses (multi-horizon rollout, counterfactuals) call
+        ``transition`` directly so gradients flow through the rollout.
+        """
         steps = int(steps or self.cfg.sample_steps)
-        value = torch.randn_like(departure) if noise is None else noise.clone()
+        value = torch.randn_like(departure) if noise is None else noise
         dt = 1.0 / steps
         for index in range(steps):
             tau = torch.full(
@@ -111,3 +120,23 @@ class FactorizedWorldActionDynamics(nn.Module):
         parts = split_branches(output, self.cfg.branch_sizes)
         parts["static"] = split_branches(departure, self.cfg.branch_sizes)["static"]
         return torch.cat(tuple(parts[name] for name in BRANCHES), dim=-2)
+
+    @torch.no_grad()
+    def sample(self, departure, ego_action, opponent_plan, steps=None, noise=None):
+        noise = noise.clone() if noise is not None else None
+        return self.transition(departure, ego_action, opponent_plan, steps, noise)
+
+
+@register("model", "causal_world_action_dynamics")
+def build_causal_world_action_dynamics(
+    action_dim=320, opponent_plan_dim=320, device="cpu", **kwargs
+):
+    """Factory: ``model.type: causal_world_action_dynamics``.
+
+    Builds only the trainable factorized flow.  The frozen belief encoder and
+    tokenizers are supplied separately by the trainer (they come from the
+    stage-1 ``belief_encoder_ckpt``, not from ``cfg.model``).
+    """
+    cfg = FactorizedDynamicsConfig.from_dict(kwargs.get("factorized_dynamics", kwargs))
+    model = FactorizedWorldActionDynamics(int(action_dim), int(opponent_plan_dim), cfg)
+    return model.to(device)

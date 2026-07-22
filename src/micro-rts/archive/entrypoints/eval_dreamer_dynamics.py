@@ -54,8 +54,8 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
-_PKG = _HERE.parents[1]          # src/micro-rts
-_SRC = _HERE.parents[2]          # src
+_PKG = _HERE.parents[3]          # src/micro-rts
+_SRC = _HERE.parents[3]          # src
 for p in (str(_PKG), str(_SRC)):
     if p not in sys.path:
         sys.path.insert(0, p)
@@ -654,7 +654,7 @@ def main(argv=None):
     # the aggregate rolled-action ratios above have a built-in SNR ceiling
     # (~6% of latent cells carry an issued action), so this is the primary
     # action-conditioning verdict input; see probes.py.
-    from entrypoints.probes import counterfactual_action_probe
+    from entrypoints.util.probes import counterfactual_action_probe
     probe_acc: dict[str, list] = {}
     with torch.no_grad():
         for bi, b in zip(range(args.rollout_batches), loader):

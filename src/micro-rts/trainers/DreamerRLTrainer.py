@@ -42,7 +42,7 @@ from loss.dreamer import (
 from collectors.offline_data import build_mrts_loader, cycle, to_device
 from rewards.rewards import reward_weight
 
-from core.registry import build
+from core.registry import build, register
 
 # Registry side effect: make the ``dreamerv4`` model type buildable.
 import models.dreamer  # noqa: F401
@@ -55,6 +55,7 @@ from trainers.BaseTrainer import BaseTrainer
 MODES = ("imagination", "hybrid", "online")
 
 
+@register("trainer", "dreamerv4")
 class DreamerRLTrainer(BaseTrainer, AbstractDreamerTrainer):
     def __init__(self, cfg, device: str | None = None) -> None:
         BaseTrainer.__init__(self, cfg, device)
@@ -388,7 +389,7 @@ class DreamerRLTrainer(BaseTrainer, AbstractDreamerTrainer):
         # buffer stores no opponent stream, so only the self channel is probed;
         # a ~0 gap means the actor is being trained inside action-insensitive
         # mush and the run should be stopped.
-        from entrypoints.probes import counterfactual_action_probe
+        from entrypoints.util.probes import counterfactual_action_probe
 
         out.update(counterfactual_action_probe(
             policy, z, b["action"], b.get("opponent_action"), b["is_first"],

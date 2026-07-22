@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 HERE = Path(__file__).resolve()
-for root in (HERE.parents[1], HERE.parents[2]):
+for root in (HERE.parents[2], HERE.parents[3]):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 

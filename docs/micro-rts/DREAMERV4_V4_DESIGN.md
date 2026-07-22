@@ -217,11 +217,11 @@ Two independent runs, launchable in parallel (they share nothing but the data):
 ```bash
 # A. dynamics_v4: cell-weighted flow, FROZEN v3 tokenizer  (the primary fix)
 python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-    --exp micro-rts/pretrain_dreamerv4_dynamics_v4
+    --exp micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics_v4
 
 # B. tokenizer_v4: group-CE + cell-weighted recon           (the refinement)
 python src/micro-rts/entrypoints/train_dreamer_tokenizer.py \
-    --exp micro-rts/pretrain_dreamerv4_tokenizer_v4
+    --exp micro-rts/tokenizer/dreamerv4/pretrain_dreamerv4_tokenizer_v4
 ```
 
 Decision tree:

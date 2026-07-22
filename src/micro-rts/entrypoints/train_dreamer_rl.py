@@ -42,25 +42,20 @@ for p in (str(_PKG), str(_SRC)):
 
 from core.config import Config  # noqa: E402
 
-import models.dreamer  # noqa: E402,F401  (registry side effect)
-import models.dreamer_v2  # noqa: E402,F401  (structured agent registry)
-from trainers.DreamerRLTrainer import DreamerRLTrainer  # noqa: E402
-from trainers.StructuredDreamerRLTrainer import StructuredDreamerRLTrainer  # noqa: E402
-from trainers.IncompleteBeliefRLTrainer import IncompleteBeliefRLTrainer  # noqa: E402
+import registry_imports  # noqa: E402,F401  (fires model/trainer decorators)
+from core.registry import build  # noqa: E402
 from trainers.BaseTrainer import resolve_device  # noqa: E402
 
 
-def build_trainer(args) -> DreamerRLTrainer | StructuredDreamerRLTrainer | IncompleteBeliefRLTrainer:
+def build_trainer(args):
     cfg = Config.from_experiment(args.exp)
     overrides = list(args.set)
     if args.mode:
         overrides.append(f"training.dreamer.mode={args.mode}")
     cfg.apply_overrides(overrides)
-    trainer_cls = {
-        "structured_dreamer": StructuredDreamerRLTrainer,
-        "incomplete_belief_dreamer": IncompleteBeliefRLTrainer,
-    }.get(cfg.model.get("type"), DreamerRLTrainer)
-    trainer = trainer_cls(cfg)
+    # RL trainer resolved from model.type (defaults to the base dreamerv4 loop).
+    trainer_type = cfg.model.get("type", "dreamerv4")
+    trainer = build("trainer", type=trainer_type, cfg=cfg)
     if args.device:
         trainer.device = resolve_device(args.device)
     if args.no_wandb:

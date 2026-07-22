@@ -28,8 +28,8 @@ from pathlib import Path
 
 # Path setup (run directly, not just under pytest).
 _HERE = Path(__file__).resolve()
-_PKG = _HERE.parents[1]          # src/micro-rts
-_SRC = _HERE.parents[2]          # src
+_PKG = _HERE.parents[3]          # src/micro-rts
+_SRC = _HERE.parents[3]          # src
 for p in (str(_PKG), str(_SRC)):
     if p not in sys.path:
         sys.path.insert(0, p)

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve()
-for path in (HERE.parents[1], HERE.parents[2]):
+for path in (HERE.parents[2], HERE.parents[3]):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 

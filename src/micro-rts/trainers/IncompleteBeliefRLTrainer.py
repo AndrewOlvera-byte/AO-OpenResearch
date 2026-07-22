@@ -10,8 +10,10 @@ from evaluation.matchplay import build_report, run_match_eval
 from models.incomplete_info import IncompleteBeliefAgentConfig, IncompleteBeliefDreamer
 from rewards.rewards import reward_weight
 from trainers.StructuredDreamerRLTrainer import StructuredDreamerRLTrainer
+from core.registry import register
 
 
+@register("trainer", "incomplete_belief_dreamer")
 class IncompleteBeliefRLTrainer(StructuredDreamerRLTrainer):
     """Reuse structured Dreamer's heads, PMPO, W&B, eval, and checkpoints.
 

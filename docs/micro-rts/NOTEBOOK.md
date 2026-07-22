@@ -395,20 +395,20 @@ transformer on the same latent.
    the cleanest answer about the frozen tokenizer:
 
        python src/micro-rts/entrypoints/train_dreamer_rl.py \
-           --exp micro-rts/rl_dreamerv4_online_representation_v4
+           --exp micro-rts/rl/dreamerv4/rl_dreamerv4_online_representation_v4
 
 2. **Retrain dynamics v4.5 on the already-collected v3.1 corpus** using the
    frozen v4 tokenizer and `opp_bc_coef=0.3`:
 
        python src/micro-rts/entrypoints/train_dreamer_dynamics.py \
-           --exp micro-rts/pretrain_dreamerv4_dynamics_v4_5
+           --exp micro-rts/dynamics/dreamerv4/pretrain_dreamerv4_dynamics_v4_5
 
 3. **After v4.5 passes the dynamics evaluator**, run the repaired hybrid with a
    fresh output name. The health gate keeps actor/critic paused until live
    replay passes:
 
        python src/micro-rts/entrypoints/train_dreamer_rl.py \
-           --exp micro-rts/rl_dreamerv4_hybrid_v4_4 \
+           --exp micro-rts/rl/dreamerv4/rl_dreamerv4_hybrid_v4_4 \
            --set run.name=rl_dreamerv4_hybrid_v4_5 \
            --set training.dreamer.init_from=checkpoints/dreamer_dynamics_v4_5.pt
 
@@ -787,7 +787,7 @@ occupied in the inspected examples), 64 spatial tokens, and only about 1.8
 changed cells per action.
 
 The next controlled experiment is
-`micro-rts/pretrain_structured_dynamics_v2_causal_paired`. It keeps the same
+`micro-rts/dynamics/structured_v2/causal_paired/pretrain_structured_dynamics_v2_causal_paired`. It keeps the same
 tokenizer, transformer, data split, and 60k-step budget, but changes the training
 contract:
 
@@ -848,7 +848,7 @@ stronger causal signal here, but the model has not yet earned a general
 one-step mechanics pass on the aggregate transition metric.
 
 The next experiment is
-`micro-rts/pretrain_structured_dynamics_v2_causal_paired_v3`:
+`micro-rts/dynamics/structured_v2/causal_paired/pretrain_structured_dynamics_v2_causal_paired_v3`:
 
 - initialize from `checkpoints/pretrain_structured_dynamics_v2_causal_paired_v2/best.pt`;
 - retain the same tokenizer, transformer, zero-noise one-step target, loss
@@ -1379,7 +1379,7 @@ coordinate bridge while also regenerating all 195 arrival tokens from zero.
 That is unnecessarily difficult for a deterministic, sparse transition.
 
 The new experiment is
-`micro-rts/pretrain_structured_dynamics_v2_causal_paired_action_grounded_residual`.
+`micro-rts/dynamics/structured_v2/causal_paired/pretrain_structured_dynamics_v2_causal_paired_action_grounded_residual`.
 It is an opt-in, checkpoint-compatible extension with six changes:
 
 1. transfer the complete pretrained forward router and initialize prediction as
@@ -1501,7 +1501,7 @@ weight `0.05`, changed-token boost `8`, direct grounding, and a checkpoint metri
 that did not protect unweighted fidelity.
 
 The successor experiment is
-`micro-rts/pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region`.
+`micro-rts/dynamics/structured_v2/trust_region/pretrain_structured_dynamics_v2_causal_paired_action_residual_trust_region`.
 It freezes the complete pretrained router, lowers peak LR from `1e-4` to `1e-5`,
 penalizes factual and counterfactual correction magnitude, restores padding
 weight to `1.0`, reduces changed-token boost to `2`, and disables direct
@@ -1518,3 +1518,461 @@ router remains exactly frozen, and the step-zero audits retain prefix geometry
 fixed-validation factual MSE `0.1569` beating copy `0.1647`. Canonical grounding
 should only return as a separately gated fine-tune after unweighted, paired-CF,
 decoded mechanics, and rollout gates all improve over this frozen-prior floor.
+
+## Discrete autoregressive structured world model direction (2026-07-15)
+
+The structured-v2 tokenizer embeds categorical engine fields but does **not**
+produce discrete latent tokens. It currently emits 195 dense vectors of width
+128 (64 spatial, 128 entity, and 3 global tokens). The causal-paired dynamics
+model regresses the next continuous vectors with MSE, then the frozen decoder
+maps an approximate latent back across categorical and rounded-numeric
+boundaries. This explains how a small, apparently acceptable latent error can
+become a wrong occupancy, unit type, assignment, HP value, or final raster cell.
+
+### Placement of the discrete bottleneck
+
+The minimal retrofit places a quantizer after the structured observation
+encoder and before the dynamics transformer:
+
+```text
+canonical state -> observation encoder -> discrete bottleneck -> code IDs
+code IDs -> learned code embeddings -> causal dynamics transformer
+predicted code IDs -> frozen discrete decoder -> exact canonical state/raster
+```
+
+The action side is different. Sparse action events are already discrete tuples
+(role, source, type, target, direction, produced type, attack location). They do
+not require a lossy quantizer merely to become discrete. The existing action
+encoder can either be replaced by embeddings of those factorized IDs, or retain
+its SSL-trained representation and terminate in one or more categorical action
+codes. Quantizing a continuous action embedding is only justified if it gives a
+smaller vocabulary while preserving exact event reconstruction and causal
+effect probes. The state quantizer is the load-bearing change.
+
+For MicroRTS, direct factorized canonical tokens may be stronger than a generic
+VQ-VAE because the source state is already symbolic. A practical compact option
+is product quantization: each spatial/entity slot emits several categorical
+codes from small codebooks instead of one enormous code for the Cartesian
+product of all fields. Numeric engine values should be bounded categorical
+tokens wherever their domains are finite; truly wide counters can use digit or
+bucket-plus-residual codes. The tokenizer gate is near-lossless canonical
+reconstruction, not perceptual similarity.
+
+### How tokenizer pretraining changes
+
+Tokenizer pretraining becomes discrete-interface certification:
+
+1. Encode each state into hard categorical codes using factorized logits,
+   straight-through Gumbel/argmax, EMA VQ, or a product-codebook equivalent.
+2. Decode only from the hard codes; never let a continuous bypass carry state.
+3. Train field-wise cross-entropy for categorical and bounded numeric fields,
+   plus codebook commitment/usage regularization where learned VQ is used.
+4. Track exact cell, exact changed-cell, exact frame, occupied type, globals,
+   code usage/perplexity, and round-trip determinism. Pixel/raster exact match
+   is a promotion gate.
+5. Freeze the certified encoder, codebooks, and decoder before dynamics
+   training so dynamics cannot improve its loss by moving the representation.
+
+The action-tokenizer phase becomes optional for representation compression,
+not state reconstruction. If retained, it should predict exact discrete action
+codes, reconstruct every event field, and preserve factual/counterfactual
+effect discrimination. The current continuous forward-delta router would be
+replaced by action-conditioned next-code logits or a discrete delta prior.
+
+### Simplified dynamics transformer
+
+The dynamics model can then be a conventional action-conditioned categorical
+Transformer trained with teacher-forced next-token cross-entropy:
+
+```text
+[current state codes, self/opponent action codes] -> next-state code logits
+```
+
+This removes target noise, latent mean/std normalization, signal/timestep
+embeddings, the flow head, Euler integration, continuous correction magnitude,
+and the decoder-boundary mismatch. Counterfactual pairs remain useful: train
+the factual and paired next-code likelihoods and compare their categorical
+state deltas. Exact code accuracy, changed-code F1, and open-loop canonical
+state accuracy replace latent MSE as primary gates.
+
+Serial generation of hundreds of within-frame codes could make imagination
+slower than the present one-forward-pass model. Start with blockwise generation:
+autoregress across semantic groups or product-codebook depth, while predicting
+independent slots in parallel inside each block. Only introduce fully serial
+cell-token generation if the dependency gain justifies its rollout cost.
+
+### Retaining shortcut forcing without flow matching
+
+The current shortcut head compresses denoising/flow steps and is not directly
+meaningful once generation is categorical. Preserve the useful principle as a
+temporal shortcut objective instead: condition on a horizon token and predict
+the discrete state at `t+1`, `t+2`, `t+4`, and so on. Train consistency between
+a direct `t+k` prediction and recursive one-step predictions, and include
+model-generated histories to control exposure bias. This keeps fast long-range
+imagination and shortcut supervision without maintaining a continuous flow
+process.
+
+### Expected actor impact and experiment gate
+
+The actor and critic consume learned embeddings of the sampled state codes.
+This gives them bounded, on-manifold imagined states and explicit uncertainty,
+but sampled codes break ordinary continuous pathwise gradients. Use
+straight-through categorical samples, a DreamerV2-style estimator, or policy
+gradient through imagined rewards/values. The first experiment should be an
+architecture-matched continuous-versus-discrete ablation on the same corpus:
+tokenizer exactness first, then one-step factual/counterfactual accuracy,
+10/50/250-tick exact rollouts, imagination speed, and finally actor return.
+The active continuous trust-region run remains the baseline rather than being
+treated as evidence against this redesign.
+
+## Discrete-v3 parallel pretraining path implemented (2026-07-15)
+
+The discrete direction is now an additive model family rather than a rewrite of
+the continuous structured-v2/Dreamer-4 stack. This is the intended boundary:
+MicroRTS can select a hard categorical interface and a conventional causal
+language model, while environments that benefit from continuous differentiable
+latents retain the existing tokenizer, flow matching, shortcut forcing, and
+Dreamer actor path unchanged.
+
+Two local measurements make this split concrete. On 1,024 transitions sampled
+across the v4 corpus, the frozen 195x128 compressed structured tokenizer reached
+`0.9646` exact cells but only `0.0020` exact frames and `0.0078` exact global
+vectors after decode/rounding. The 387-token full-spatial oracle reached
+`0.9715` exact cells but the same `0.0020` exact frames and zero exact globals.
+Most remaining errors were assignment timing fields. High average field or cell
+accuracy is therefore not a certified world-state interface.
+
+An 8,192-transition corpus audit found a mean of 19.15 occupied entities (max
+52), 9.68 issued joint-action events (max 42), and 14.64 changed cells per
+transition. Only 0.27% of sampled rows exceeded 32 action events, but the
+existing 32-slot interface was still measurably lossy; discrete-v3 defaults to
+48 and leaves 32/64 as explicit ablations. Stored counterfactual branches
+changed only 0.85 cells on average, confirming that causal supervision must be
+balanced explicitly rather than diluted into all next-state codes.
+
+### Implemented phase boundary
+
+The new path is:
+
+```text
+canonical state
+  -> hard product-code tokenizer
+  -> integer observation code IDs
+
+sparse discrete action tuples + current code embeddings
+  -> discrete action-JEPA
+  -> transferable next-code prior logits
+
+[current codes, action events, BOS_NEXT, teacher-forced next codes]
+  -> base causal transformer
+  -> autoregressive next-code logits
+  -> frozen hard-code decoder
+  -> canonical state / raster / legal mask
+```
+
+`discrete_tokenizer.py` implements a straight-through argmax product bottleneck.
+The encoder embeds canonical finite fields and explicit x/y coordinates,
+optionally groups cells spatially, and emits `D` hard IDs from `K`-way
+codebooks at every semantic slot. The decoder sees only hard-code embeddings;
+there is no continuous bypass. All categorical and bounded numeric engine
+fields, including timers and globals, use cross-entropy heads. Code sample
+entropy versus aggregate codebook entropy regularizes confidence and usage.
+Promotion metrics are exact cell, frame, globals, complete round trip, OOV rate,
+and code perplexity.
+
+The initial compact config has 64 spatial plus four global semantic slots,
+four 512-way codes per slot, and therefore 272 base codes per frame. A sibling
+full-resolution capacity control has 256 spatial plus four global slots and two
+1024-way codes per slot, or 520 base codes. These are experiment points, not a
+premature token-count decision. The compact tokenizer must earn promotion by
+near-perfect canonical and raster round trips; otherwise use the full-resolution
+control before changing the language model.
+
+### Discrete action-JEPA loss
+
+`discrete_action_tokenizer.py` preserves the part of R1 that worked. Actions
+remain one exact event tuple per slot; they are already discrete and are not put
+through a lossy VQ bottleneck. Role, type, direction, produced type, attack
+offset, and source/destination coordinates retain separate embeddings. The
+pretrainer combines:
+
+1. exact event validity and field reconstruction;
+2. inverse event reconstruction from hard before/after code embeddings;
+3. balanced changed-code plus unchanged-code next-state cross-entropy from
+   `(current codes, action events)`;
+4. counterfactual next-code cross-entropy on cloned branches;
+5. a categorical intervention margin that requires the factual branch to
+   prefer the factual code over the counterfactual code and vice versa wherever
+   the paired outcomes differ;
+6. inverse-to-forward event-token alignment.
+
+The event encoder, event positions, state-query cross-attention router, and all
+next-code prior heads transfer together. This directly avoids the earlier R1
+handoff error where dynamics retained the action embeddings but discarded the
+learned action-to-state bridge.
+
+### No-flow causal transformer and loss
+
+`discrete_dynamics.py` is a standard prefix-causal transformer over:
+
+```text
+[current base codes, up to 48 action events, BOS_NEXT, next base codes]
+```
+
+With the compact tokenizer the maximum training sequence is 593 positions:
+272 current codes, 48 actions, and 273 next-code inputs. Current and target code
+positions receive discrete semantic-slot, product-depth, and x/y coordinate
+embeddings. Action events retain discrete source and destination coordinates.
+The model predicts one `K`-way logit vector per base code, uses teacher forcing,
+and can generate the complete next frame autoregressively. The transferred
+action-JEPA logits are a prior; zero-initialized transformer heads learn residual
+logit corrections.
+
+The dynamics objective is balanced factual changed/unchanged code
+cross-entropy, counterfactual code cross-entropy, and the paired categorical
+preference margin. Primary metrics are all-code and changed-code accuracy,
+teacher-forced and true-autoregressive canonical exactness, changed-cell F1,
+paired effects, and action overflow. There is deliberately no latent MSE,
+continuous effect cosine/norm loss, target noise, latent mean/std, flow head,
+signal/step token, shortcut head, or Euler sampler.
+
+For the paired margin, factual and alternative-action logits are evaluated
+under the same factual target prefix. This prevents the transformer from
+satisfying the intervention objective by reading already-diverged
+teacher-forced target history instead of using the changed action.
+
+The runnable configs are under `tokenizer/discrete_v3` and
+`dynamics/discrete_v3`; the commands are `train_discrete_tokenizer.py`,
+`train_discrete_action_tokenizer.py`, `train_discrete_dynamics.py`, and
+`eval_discrete_dynamics.py`. Focused discrete tests and the existing
+structured-v2 suite pass, and all three phases complete two-step CPU HDF5 smoke
+runs. RL/actor integration remains intentionally gated on tokenizer exactness
+and factual/counterfactual autoregressive mechanics rather than being coupled to
+this first implementation.
+
+## Decision-useful imagination experiment matrix
+
+The structured flow world model has now crossed the important systems threshold:
+an actor trained with PMPO on eight-step imagined trajectories from a frozen,
+imperfect model can improve when returned to the real MicroRTS engine. The current
+reference point is a 0.78M-parameter structured observation tokenizer and a
+29.1M-parameter dynamics model. Its rollouts are not exact, but they preserve
+enough action-relevant structure to produce occasional strong real evaluations.
+
+The next question is not whether the pipeline runs, but which combination of
+representation objective, model capacity, imagination horizon, and policy
+constraint maximizes real policy improvement without increasing model
+exploitation. Use the following controlled matrix:
+
+| Axis | Reference | Primary experiment points |
+|---|---|---|
+| Observation tokenizer objective | semantic reconstruction | reconstruction + masked spatial JEPA + factual/counterfactual temporal JEPA |
+| Observation tokenizer capacity | 0.78M, `d_latent=128`, depth 2 | approximately 5--10M, `d_latent=256`, depth 4 |
+| Dynamics capacity | 29M, `d_model=512`, depth 8 | approximately 100M (`768x12`), then approximately 175--230M (`1024x12--16`) only if scaling is positive |
+| Imagination horizon | 8 | 2, 4, 8; test 16 only after the larger model passes the eight-step rollout gates |
+| PMPO prior constraint | reverse-KL coefficient 0.3 | 0.1, 0.3, 1.0 |
+| Imagination context count | 8 real replay seeds per update | 32 or 64 diverse seeds per update |
+| Reward representation | one scalar dense-shaped head | separate terminal outcome and bounded differential-progress heads, composed for actor training |
+
+Keep the action-JEPA/router pretraining, causal-paired residual flow objective,
+flow query, dataset split, actor architecture, seeds, and evaluation opponents
+fixed wherever possible. A new observation tokenizer changes the latent interface,
+so the action encoder/router must be retrained against it before comparing
+dynamics scales.
+
+### Promotion measurements
+
+Do not promote from teacher-forced latent loss alone. Record all of the following
+at horizons 1, 2, 4, 8, and optionally 16:
+
+1. real-engine versus autoregressive presence, ownership, unit type, health,
+   resources, timers, and legal-action masks;
+2. changed-cell precision, recall, and F1, with separate metrics for unit creation,
+   destruction, movement, production, and combat;
+3. factual and counterfactual effect direction and magnitude;
+4. reward error split into zero, dense-event, win, loss, and timeout rows;
+5. action-event and entity overflow rates;
+6. imagined return, real dense return, real win/draw/loss rate, and per-opponent
+   win rate;
+7. actor entropy, reverse KL to the behavior prior, critic calibration, and the
+   fraction of positive PMPO advantages.
+
+Define the policy exploitation gap as:
+
+```text
+exploitation_gap = normalized_imagined_policy_gain - normalized_real_policy_gain
+```
+
+The preferred model is not necessarily the one with the lowest aggregate latent
+MSE. Promote the smallest model that improves real policy performance across
+multiple seeds while keeping the exploitation gap, semantic rollout drift, and
+action-mask errors bounded.
+
+### Staged compute plan
+
+Run the approximately 100M dynamics model locally first. Train it for 30--40k
+steps, compare it with the 29M reference at matched steps and on the full
+autoregressive gate, and continue to 160--180k only if it already separates.
+On the RTX 5070 Ti, the complete improved-tokenizer, retrained-action-interface,
+and approximately 100M dynamics pipeline is expected to take roughly 30--40
+hours. A positive scaling result justifies renting a larger GPU for the
+approximately 175--230M point; without that intermediate result, a larger run
+would confound representation quality with raw capacity.
+
+## Exact temporal-JEPA tokenizer objective selected (2026-07-16)
+
+The medium JEPA/reconstruction comparison showed that temporal supervision adds
+useful state information, but the normalized-regression decoder was not a
+certified discrete engine-state interface. Empty cells made aggregate exact-cell
+accuracy look strong while occupied cells, assigned-unit clocks, global vectors,
+and full-frame round trips remained the actual bottleneck. The next pipeline
+therefore keeps the continuous structured latent and successful action JEPA, but
+changes its observation interface and temporal grounding rather than switching
+the whole world model to hard observation codes.
+
+The selected tokenizer objective is:
+
+```text
+L = L_exact_reconstruct(s_t)
+  + L_EMA-JEPA(z_t, a_t, z_t+1)
+  + L_EMA-JEPA(z_t, a_cf, z_cf)
+  + 2 L_paired_effect
+  + 0.1 L_exact_decode(predicted factual z_t+1)
+  + 0.1 L_exact_decode(predicted counterfactual z_cf)
+  + L_clock_consistency
+```
+
+All finite canonical cell and global fields now use categorical input embeddings,
+cross-entropy decoder heads, exact argmax reconstruction, per-field clipping
+diagnostics, and occupied/assigned/full-frame promotion metrics. Unit IDs remain
+excluded. The only non-obvious field is absolute assignment `start_tick`: its
+local category is the bounded action age `tick - start_tick`, and decoding
+recovers the canonical absolute value from the predicted global clock. This is
+both mechanically sufficient and much smaller than a 2,049-way classifier at
+every cell. A clock-consistency term enforces
+`remaining = max(eta - action_age, 0)`.
+
+The temporal predictor now produces a raw latent delta. Its factual and cloned
+counterfactual arrivals are normalized for the EMA JEPA/effect losses and also
+decoded through the exact online heads. Exact arrival grounding uses an 8x weight
+on cells changed from the departure state. This prevents a low latent loss from
+hiding a mechanically wrong next state while keeping categorical grounding
+auxiliary to the representation target. The new configs also use 48 action-event
+slots because the corpus maximum is 42 and the former 32-slot limit clipped about
+0.27% of transitions.
+
+A stride-1,000 audit of 3,840 frames established the configured finite support:
+tick <= 1998, HP <= 10, carried <= 25, action age <= 199, ETA <= 250,
+remaining <= 220, player resources <= 19, and reserved positions <= 41. The
+config uses power-of-two margins and reports a combined clipping fraction during
+training. The deployable tokenizer is 9,987,927 parameters; disposable EMA target
+and JEPA predictor bring pretraining to 23,484,334 parameters.
+
+The runnable phase-1 config is
+`paper/tokenizer/pretrain_medium_jepa_exact.yaml`; the unchanged winning
+action-JEPA/router warmup is wired to its checkpoint in
+`paper/tokenizer/pretrain_action_encoder_medium_jepa_exact.yaml`. Both entrypoints
+complete two-step CPU HDF5 smoke runs, and the full structured-v2 test module
+passes (22 tests). The older medium JEPA and reconstruction runs/configs remain
+unchanged as historical controls.
+
+## Medium exact-JEPA dynamics result at 160k (2026-07-18)
+
+The 103.1M-parameter medium run
+`pretrain_flow_dynamics_medium_jepa_exact` completed 160,000 steps. Validation
+selected step 159,000 by unweighted factual latent MSE. On the fixed held-out
+128-transition exact evaluator, this checkpoint reached:
+
+| metric | step 39k | step 92k | step 159k |
+|---|---:|---:|---:|
+| latent MSE | 0.107991 | 0.085310 | **0.070295** |
+| paired counterfactual latent MSE | 0.072779 | 0.051524 | **0.042281** |
+| changed-cell F1 | 0.959799 | 0.970338 | **0.973382** |
+| unit-type accuracy | 0.978416 | 0.981224 | **0.983009** |
+| exact cell | 0.962494 | 0.963623 | **0.964050** |
+| exact occupied cell | 0.485654 | 0.500396 | **0.502732** |
+| exact assigned cell | 0.311548 | 0.313261 | **0.309358** |
+| exact frame | 0.109375 | 0.117188 | **0.117188** |
+| exact globals | 0.078125 | 0.078125 | **0.078125** |
+| exact round trip | 0.039062 | 0.039062 | **0.046875** |
+| paired counterfactual effect F1 | 0.429487 | 0.479333 | **0.481443** |
+
+Thus, from 39k to 159k, factual latent MSE fell by approximately 35% and paired
+counterfactual latent MSE by approximately 42%. The model continued to learn
+the transition and action-conditioned effect, but the mechanically important
+exact metrics barely moved. The final step-160k checkpoint was slightly worse
+factually (`latent_mse=0.071789`, `changed_f1=0.969191`) but better on paired
+counterfactual effect F1 (`0.507898`); retain it as a counterfactual-specialized
+candidate while using step 159k as the primary checkpoint.
+
+The fixed eight-trajectory autoregressive probe for step 159k was:
+
+| horizon | presence | unit type | exact cell | changed-cell F1 |
+|---:|---:|---:|---:|---:|
+| 1 | 0.998047 | 0.978526 | 0.969727 | 0.965759 |
+| 2 | 0.995117 | 0.950748 | 0.945801 | 0.948280 |
+| 4 | 0.991699 | 0.915831 | 0.937988 | 0.910786 |
+| 8 | 0.976074 | 0.716383 | 0.929199 | 0.839875 |
+
+This is a positive scaling result: H2/H4/H8 changed-cell F1 improved over the
+39k checkpoint, so the gain is not only teacher-forced latent regression.
+Nevertheless, no complete frame was exact after H1 in this small rollout probe,
+and unit-type accuracy degraded sharply by H8. The model is a useful semantic
+simulator, not yet a near-deterministic game engine.
+
+### Why the current dynamics objective does not cover exact engine prediction
+
+The exact temporal-JEPA tokenizer pretraining objective and the dynamics
+objective are not the same objective. Tokenizer pretraining uses categorical
+reconstruction and exact decoded-arrival grounding, but the promoted dynamics
+config sets `canonical_grounding_coef: 0.0`. During dynamics training the frozen
+decoder is therefore outside the loss. The 28-block predictor is optimized to
+land near the target in continuous latent space, not to remain on the correct
+side of every frozen categorical decoder boundary. A progressively smaller MSE
+can consequently coexist with an unchanged argmax category.
+
+Several more specific gaps explain the observed plateau:
+
+1. **No per-field categorical dynamics loss.** Presence, ownership, type, HP,
+   assignment, action phase, direction, production type, clocks, resources, and
+   terminal globals are only compared after evaluation-time decoding. The loss
+   cannot distinguish a harmless within-category latent error from a smaller
+   error that crosses a mechanically critical category boundary.
+2. **The paired effect loss is continuous.** Latent effect MSE plus cosine and
+   norm terms reward the direction and magnitude of an intervention. They do
+   not require the factual branch to prefer the exact factual category and the
+   cloned branch to prefer the exact counterfactual category at every changed
+   field. Effect F1 flattening while paired latent MSE keeps improving is the
+   expected failure mode.
+3. **One-step supervision has no rollout-consistency term.** Training uses
+   `seq_len: 1` and always starts from an encoded real departure. It never has
+   to consume its own discretized or continuous prediction and remain exact for
+   the next two, four, or eight transitions. Small category and clock errors are
+   therefore free to compound at inference.
+4. **Aggregate token weighting is not exact-state weighting.** Active and
+   changed tokens receive boosts, but the objective remains an average over
+   latent dimensions and tokens. Sparse occupied, assigned, global, spawn,
+   destruction, and terminal errors contribute little compared with the many
+   easy unchanged or padded positions. Exact frame and round trip are
+   conjunctive metrics: one wrong field makes the entire example fail.
+5. **The residual path is rewarded for conservative prediction.** Most cells do
+   not change in one engine step. Residual prediction plus a correction penalty
+   makes copying the departure an excellent prior. Changed-token weighting
+   improves event F1, but does not impose an exact categorical cost large enough
+   to dominate the conservative solution on rare transitions.
+6. **Exactness is bounded by the frozen tokenizer interface.** Even a perfect
+   latent transition cannot exceed the tokenizer decoder's reconstruction
+   ceiling. Dynamics evaluation must therefore continue to report both an
+   oracle tokenizer round trip and predicted round trip on precisely the same
+   rows, separating representation errors from transition errors.
+
+The result does not reject JEPA or the causal-paired action objective. They are
+providing strong semantic and counterfactual representations. It shows that
+latent proximity is an incomplete surrogate for discrete engine equivalence.
+The next configuration should preserve the JEPA tokenizer, pretrained action
+encoder/router, residual flow initialization, and paired branches, while adding
+decoded categorical grounding for factual and counterfactual arrivals. Changed
+fields, occupied/assigned cells, globals, and terminal rows should receive
+explicit weights. If this improves one-step exactness, add a short scheduled
+self-rollout consistency loss; do not confound both changes in the first
+ablation.

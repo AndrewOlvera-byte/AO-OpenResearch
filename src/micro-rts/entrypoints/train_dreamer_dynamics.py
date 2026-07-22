@@ -1009,7 +1009,7 @@ def main(argv=None):
         # action streams. If shuffling does not hurt, the model ignores that
         # channel and imagination training is pointless. `probes.py` has the
         # shared implementation; gaps must be > 0 and grow with horizon.
-        from entrypoints.probes import counterfactual_action_probe
+        from entrypoints.util.probes import counterfactual_action_probe
 
         vals.update(
             counterfactual_action_probe(
