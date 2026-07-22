@@ -2,7 +2,7 @@
 
 Importing this module imports every trainer module so their
 ``@register("trainer", ...)`` decorators fire and ``build("trainer", ...)``
-can resolve a trainer class from a config ``model.type``.
+can resolve a trainer class from a config ``trainer.type``.
 
 Import-only and idempotent.  Keep this package-local: it must never import
 ``atari`` (atari and micro-rts both expose a top-level ``models``/``trainers``
@@ -11,7 +11,7 @@ and share only ``core``/``shared``).
 
 from __future__ import annotations
 
-# RL trainers (registered by their model.type keys).
+# RL trainers (selected explicitly by trainer.type).
 from . import DreamerRLTrainer  # noqa: F401
 from . import IncompleteBeliefRLTrainer  # noqa: F401
 from . import PPOTrainer  # noqa: F401
@@ -24,3 +24,9 @@ from . import incomplete_dynamics_trainers  # noqa: F401
 from . import incomplete_tokenizer_trainers  # noqa: F401
 from . import WorldActionDynamicsTrainer  # noqa: F401
 from . import WorldActionEncoderTrainer  # noqa: F401
+from . import StructuredActionTokenizerTrainer  # noqa: F401
+from . import TokenizerTrainers  # noqa: F401
+from . import DynamicsTrainers  # noqa: F401
+from . import DiscreteTokenizerTrainer  # noqa: F401
+from . import DiscreteActionTokenizerTrainer  # noqa: F401
+from . import DiscreteDynamicsTrainer  # noqa: F401

@@ -66,6 +66,7 @@ class Config:
     model: Dict[str, Any]
     data: Dict[str, Any]
     training: Dict[str, Any]
+    trainer: Dict[str, Any]
     wandb: Dict[str, Any]
 
     @classmethod
@@ -91,6 +92,7 @@ class Config:
             'model',
             'data',
             'training',
+            'trainer',
             'wandb',
         }
         filtered = {k: v for k, v in merged.items() if k in known_fields}
@@ -101,7 +103,7 @@ class Config:
         """Apply ``a.b.c=value`` CLI overrides in place (value parsed as YAML).
 
         The first path segment selects a top-level section (run/model/data/
-        training/wandb); intermediate dicts are created as needed. Example::
+        training/trainer/wandb); intermediate dicts are created as needed. Example::
 
             cfg.apply_overrides(["training.ppo.lr=1e-3", "run.seed=7"])
         """

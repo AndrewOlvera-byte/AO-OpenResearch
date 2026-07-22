@@ -8,6 +8,9 @@ run:
   ckpt_dir: checkpoints
   verbose: true
 
+trainer:
+  type: dreamerv4
+
 model:
   type: dreamerv4
   world_lr: 3.0e-5

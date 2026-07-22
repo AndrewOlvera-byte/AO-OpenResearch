@@ -1,4 +1,7 @@
 run: {name: probe_incomplete_self_action_tokenizer, seed: 0, device: auto}
+trainer:
+  type: incomplete_self_action_tokenizer
+
 model:
   self_action_tokenizer: {d_model: 128, d_latent: 320, field_dim: 32, n_heads: 8, max_action_events: 48}
 data:

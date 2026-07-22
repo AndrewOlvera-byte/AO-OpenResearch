@@ -5,6 +5,9 @@ run:
 
 # Identical action-JEPA/router warmup to the reconstruction arm. Only the frozen
 # observation-tokenizer checkpoint differs.
+trainer:
+  type: structured_v2_action_tokenizer
+
 model:
   type: structured_action_tokenizer_v2
   action_tokenizer:

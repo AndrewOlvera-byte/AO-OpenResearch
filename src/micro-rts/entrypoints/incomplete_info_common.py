@@ -2,22 +2,14 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import random
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from collectors.offline_data import build_mrts_loader, cycle, to_device
+from collectors.offline_data import build_mrts_loader, to_device
 from core.config import Config
-from entrypoints.pretrain_common import (
-    amp_ctx,
-    make_adam,
-    make_lr_scheduler,
-    setup_backend,
-)
 from models.dreamer_v2 import (
     StructuredDynamicsConfig,
     StructuredTokenizer,
@@ -25,7 +17,6 @@ from models.dreamer_v2 import (
     StructuredWorldModelV2,
     structured_tokenizer_state_dict,
 )
-from trainers.BaseTrainer import BaseTrainer
 
 
 def common_parser(description, default_exp):
@@ -189,41 +180,3 @@ def measure_plan_stats(model, loader, device, batches=16):
     mean = total / max(count, 1)
     std = (total2 / max(count, 1) - mean.square()).clamp_min(1e-6).sqrt()
     return mean, std
-
-
-def run_training(
-    cfg,
-    args,
-    model,
-    loss_fn,
-    train_loader,
-    val_loader,
-    device,
-    *,
-    phase,
-    metadata,
-    after_step=None,
-    trainable_checkpoint_only=False,
-    checkpoint_include_prefixes=(),
-):
-    """Thin shim: delegate to ``PretrainTrainer`` (the loop now lives there).
-
-    Kept so entrypoints not yet migrated to a registered ``PretrainTrainer``
-    subclass keep working unchanged.  New stages should subclass PretrainTrainer.
-    """
-    from trainers.PretrainTrainer import PretrainTrainer
-
-    return PretrainTrainer.from_prebuilt(
-        cfg,
-        args,
-        model,
-        loss_fn,
-        train_loader,
-        val_loader,
-        device,
-        phase=phase,
-        metadata=metadata,
-        after_step=after_step,
-        trainable_checkpoint_only=trainable_checkpoint_only,
-        checkpoint_include_prefixes=checkpoint_include_prefixes,
-    )

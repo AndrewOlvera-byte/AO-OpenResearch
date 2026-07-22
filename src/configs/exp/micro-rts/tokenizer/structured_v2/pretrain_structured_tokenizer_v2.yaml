@@ -3,6 +3,9 @@ run:
   seed: 0
   device: auto
 
+trainer:
+  type: structured_v2_tokenizer
+
 model:
   type: structured_v2
   tokenizer:

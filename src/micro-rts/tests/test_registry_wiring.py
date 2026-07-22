@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import inspect
 import sys
+from pathlib import Path
 
 import pytest
+import yaml
 
 
 def test_hub_registers_components_without_atari_leak():
@@ -33,6 +35,54 @@ def test_hub_registers_components_without_atari_leak():
         "joint_flow_dynamics",
     ):
         assert name in _REGISTRY["trainer"], name
+
+
+def test_every_microrts_experiment_selects_a_registered_trainer():
+    import registry_imports  # noqa: F401
+    from core.registry import registered
+
+    configs = Path(__file__).parents[2] / "configs" / "exp" / "micro-rts"
+    known = set(registered("trainer"))
+    for path in configs.rglob("*.yaml"):
+        payload = yaml.safe_load(path.read_text())
+        assert payload, f"empty experiment config: {path}"
+        trainer_type = (payload.get("trainer") or {}).get("type")
+        assert trainer_type, f"missing trainer.type: {path}"
+        assert trainer_type in known, f"unknown trainer {trainer_type!r}: {path}"
+
+
+def test_registry_reports_missing_and_duplicate_components():
+    from core.registry import build, register
+
+    with pytest.raises(KeyError, match="registered types"):
+        build("test_missing_kind", type="absent")
+
+    @register("test_duplicate_kind", "thing")
+    def first():
+        return 1
+
+    with pytest.raises(ValueError, match="duplicate registry entry"):
+
+        @register("test_duplicate_kind", "thing")
+        def second():
+            return 2
+
+
+def test_component_entrypoints_are_thin_dispatchers():
+    entrypoints = Path(__file__).parents[1] / "entrypoints"
+    for name in (
+        "train_dreamer_tokenizer.py",
+        "train_action_tokenizer.py",
+        "train_dreamer_dynamics.py",
+        "train_discrete_tokenizer.py",
+        "train_discrete_action_tokenizer.py",
+        "train_discrete_dynamics.py",
+        "train_encoder.py",
+        "train_opponent_latent.py",
+    ):
+        source = (entrypoints / name).read_text()
+        assert len(source.splitlines()) <= 30, name
+        assert "optimizer.step" not in source, name
 
 
 def test_canonical_model_builds_from_registry():
@@ -60,7 +110,9 @@ def test_dynamics_loss_coefficient_contract_matches_config_keys():
     params = inspect.signature(
         _REGISTRY["loss"]["causal_world_action_dynamics"]
     ).parameters
-    for key in (cfg.training.get("loss") or {}):
+    loss_cfg = cfg.training.get("loss") or {}
+    assert loss_cfg["type"] == "causal_world_action_dynamics"
+    for key in loss_cfg["weights"]:
         assert f"{key}_coef" in params, f"loss missing coefficient for '{key}'"
 
 

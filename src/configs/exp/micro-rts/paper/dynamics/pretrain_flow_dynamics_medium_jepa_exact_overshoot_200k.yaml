@@ -6,6 +6,9 @@ run:
 # Best-practice exact-engine continuation of the 159k medium model.  The frozen
 # exact-JEPA tokenizer remains the semantic interface; dynamics is now optimized
 # through its categorical decoder and under short closed-loop rollouts.
+trainer:
+  type: structured_v2_dynamics
+
 model:
   type: structured_v2
   tokenizer:

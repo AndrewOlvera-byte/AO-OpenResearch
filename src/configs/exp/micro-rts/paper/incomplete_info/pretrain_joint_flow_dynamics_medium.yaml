@@ -1,4 +1,7 @@
 run: {name: pretrain_incomplete_joint_flow_medium, seed: 0, device: auto}
+trainer:
+  type: joint_flow_dynamics
+
 model:
   ego_tokenizer: {d_model: 320, d_latent: 320, depth: 4, n_heads: 8, downsample: 2, n_registers: 8}
   self_action_tokenizer: {d_model: 512, d_latent: 320, field_dim: 64, n_heads: 8, max_action_events: 48}

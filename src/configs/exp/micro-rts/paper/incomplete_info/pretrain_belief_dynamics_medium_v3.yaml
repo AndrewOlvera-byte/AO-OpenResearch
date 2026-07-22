@@ -1,4 +1,7 @@
 run: {name: pretrain_belief_dynamics_medium_v3, seed: 0, device: auto}
+trainer:
+  type: belief_dynamics
+
 model:
   belief_dynamics:
     d_model: 512

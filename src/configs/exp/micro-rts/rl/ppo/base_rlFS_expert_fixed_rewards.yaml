@@ -18,6 +18,9 @@ run:
   seed: 0
   device: auto
 
+trainer:
+  type: ppo
+
 model:
   type: cnn_mlp
   neck_hidden: [256]

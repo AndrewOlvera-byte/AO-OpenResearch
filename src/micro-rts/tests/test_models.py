@@ -3,6 +3,7 @@
 import torch
 
 from models.cnn_mlp_policy import CNNMLPPolicy
+from models.dreamer.world_model import GridActionEncoder
 from models.shared.ActionHead import MultiDiscreteActionHead
 from models.shared.Encoder import ResNetEncoder
 
@@ -26,6 +27,16 @@ def test_action_head_sample_and_eval():
     logp2, ent = head.log_prob_entropy(feat, action)
     assert logp2.shape == (5,) and ent.shape == (5,)
     assert torch.allclose(logp, logp2, atol=1e-5)
+
+
+def test_grid_action_encoder_maps_invalid_sentinels_to_noop():
+    encoder = GridActionEncoder(NVEC[1:], (16, 16), d_model=32)
+    action = torch.zeros(1, 2, 256, 7, dtype=torch.long)
+    action[:, :, 0, 0] = -1
+    action[:, :, 1, 1] = 255
+    encoded = encoder(action, opp_action=action)
+    assert encoded.shape == (1, 2, 16, 32)
+    assert torch.isfinite(encoded).all()
 
 
 def test_policy_step_and_evaluate():

@@ -22,6 +22,9 @@ run:
   # Warm-start weights from the league run's best checkpoint (first clean 100% sweep).
   init_from: checkpoints/base_rlFS_expert_masked_league/best.pt
 
+trainer:
+  type: ppo
+
 model:
   type: cnn_gridnet
   channels: 64

@@ -6,6 +6,9 @@ run:
 # 103.1M-parameter exact-JEPA world model. Width remains 512 so the complete
 # pretrained event encoder and action-to-state router transfer exactly; scaling
 # comes from 28 dynamics blocks rather than an incompatible 768-wide rewrite.
+trainer:
+  type: structured_v2_dynamics
+
 model:
   type: structured_v2
   tokenizer:

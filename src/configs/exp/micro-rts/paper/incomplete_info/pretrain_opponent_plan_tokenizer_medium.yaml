@@ -1,4 +1,7 @@
 run: {name: pretrain_opponent_plan_tokenizer_medium, seed: 0, device: auto}
+trainer:
+  type: incomplete_opponent_plan_tokenizer
+
 model:
   opponent_tokenizer: {d_model: 512, d_latent: 320, field_dim: 64, n_heads: 8, depth: 3, max_action_events: 48, n_plan_tokens: 8, horizons: [0, 1, 2, 4, 8, 16]}
 data:

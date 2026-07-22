@@ -1,4 +1,7 @@
 run: {name: pretrain_belief_dynamics_medium_v2, seed: 0, device: auto}
+trainer:
+  type: belief_dynamics
+
 model:
   # The endpoint branch is trained as a direct noise-to-belief map at tau=0.
   # Deploy it the same way; v1's 4-step integration was not monotonic in eval.

@@ -1,7 +1,7 @@
 """Generic pretraining entrypoint.
 
-Dispatches to a registered ``PretrainTrainer`` subclass by the config's
-``model.type`` (or ``training.trainer``), builds it from config, and runs
+Dispatches to a registered ``PretrainTrainer`` subclass by ``trainer.type``,
+builds it from config, and runs
 ``smoke_test`` / ``train``.  Every staged pretraining run goes through here:
 
     python entrypoints/pretrain.py --exp <experiment> [--smoke] [--no-wandb]
@@ -27,33 +27,12 @@ from entrypoints.incomplete_info_common import (  # noqa: E402
     load_config,
 )
 
-# Ordered inference for configs that key the stage by which model sub-block is
-# present rather than an explicit ``model.type`` (most specific first).
-_SUBBLOCK_TRAINER = [
-    ("factorized_dynamics", "causal_world_action_dynamics"),
-    ("predictive_belief", "causal_world_action_encoder"),
-    ("belief_dynamics", "belief_dynamics"),
-    ("flow", "joint_flow_dynamics"),
-    ("intent_prior", "opponent_intent_prior"),
-    ("opponent_tokenizer", "incomplete_opponent_plan_tokenizer"),
-    ("self_action_tokenizer", "incomplete_self_action_tokenizer"),
-    ("ego_tokenizer", "incomplete_ego_tokenizer"),
-]
-
-
 def resolve_trainer_type(cfg):
-    """Explicit ``training.trainer`` / ``model.type`` win; else infer from the
-    distinctive model sub-block."""
-    model = cfg.model or {}
-    explicit = (cfg.training or {}).get("trainer") or model.get("type")
-    if explicit:
-        return explicit
-    for key, trainer_type in _SUBBLOCK_TRAINER:
-        if key in model:
-            return trainer_type
-    raise ValueError(
-        "cannot resolve trainer: set training.trainer or model.type in the config"
-    )
+    """Return the explicit trainer type; architecture inference is forbidden."""
+    trainer_type = (cfg.trainer or {}).get("type")
+    if not trainer_type:
+        raise ValueError("cannot resolve trainer: set trainer.type in the config")
+    return trainer_type
 
 
 def main(argv=None, default_exp=""):

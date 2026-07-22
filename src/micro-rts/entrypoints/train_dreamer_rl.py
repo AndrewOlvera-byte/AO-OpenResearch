@@ -23,8 +23,8 @@ experiment under ``configs/exp``; ``--test`` runs the single-iteration smoke tes
 ``--no-wandb`` disables logging; ``--device`` overrides the device; repeatable
 ``--set K=V`` applies dotted-path overrides.
 
-The DreamerV4 model type is registered by importing ``models.dreamer``; the trainer
-lives in ``trainers/DreamerRLTrainer.py``.
+The model architecture and trainer are independently selected by ``model.type``
+and ``trainer.type``.
 """
 
 from __future__ import annotations
@@ -53,8 +53,9 @@ def build_trainer(args):
     if args.mode:
         overrides.append(f"training.dreamer.mode={args.mode}")
     cfg.apply_overrides(overrides)
-    # RL trainer resolved from model.type (defaults to the base dreamerv4 loop).
-    trainer_type = cfg.model.get("type", "dreamerv4")
+    trainer_type = (cfg.trainer or {}).get("type")
+    if not trainer_type:
+        raise ValueError("RL config requires trainer.type")
     trainer = build("trainer", type=trainer_type, cfg=cfg)
     if args.device:
         trainer.device = resolve_device(args.device)

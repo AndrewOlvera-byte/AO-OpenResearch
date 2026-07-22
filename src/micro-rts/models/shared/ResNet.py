@@ -80,7 +80,7 @@ class DropPath(nn.Module):
         mask = x.new_empty(shape).bernoulli_(keep_prob)
 
         return x.div(keep_prob) * mask
-    
+
 # ---------------------------------------------------------------------
 # Residual blocks
 # ---------------------------------------------------------------------
@@ -90,7 +90,7 @@ class BottleneckPreAct(nn.Module):
     expansion: int = 4
 
     def __init__(
-        self, 
+        self,
         in_channels: int,
         planes: int,
         stride: int = 1,
@@ -119,7 +119,7 @@ class BottleneckPreAct(nn.Module):
             self.proj = conv1x1(in_channels, out_channels, stride=stride)
         else:
             self.proj = None
-        
+
     def forward(self, x: Tensor) -> Tensor:
         out = self.relu(self.bn1(x))
 
@@ -127,7 +127,7 @@ class BottleneckPreAct(nn.Module):
             shortcut = self.proj(out)
         else:
             shortcut = x
-        
+
         out = self.conv1(out)
 
         out = self.relu(self.bn2(out))

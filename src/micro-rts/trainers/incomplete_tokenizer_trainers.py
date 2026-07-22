@@ -2,7 +2,7 @@
 
 Each is a thin :class:`PretrainTrainer` subclass declaring how to build its
 loaders / frozen full-state teacher / model / loss.  The loop, checkpointing,
-and eval come from the base.  Resolved by config ``training.trainer`` (or
+and eval come from the base.  Resolved by config ``trainer.type`` (or
 ``model.type``) through the generic ``entrypoints/pretrain`` dispatcher.
 """
 

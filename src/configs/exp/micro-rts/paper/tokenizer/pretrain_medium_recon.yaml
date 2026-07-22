@@ -5,6 +5,9 @@ run:
 
 # Architecture-matched observation-tokenizer control for the paper matrix.
 # At 320-wide/depth-4 this is 7.18M parameters versus 0.78M for structured-v2.
+trainer:
+  type: structured_v2_tokenizer
+
 model:
   type: structured_v2
   tokenizer:

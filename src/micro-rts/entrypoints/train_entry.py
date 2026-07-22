@@ -36,20 +36,24 @@ for p in (str(_PKG), str(_SRC)):
         sys.path.insert(0, p)
 
 from core.config import Config  # noqa: E402
+import registry_imports  # noqa: E402,F401
+from core.registry import build  # noqa: E402
 
 # Import for registry side effects (model + curriculum registration).
 import models.cnn_mlp_policy  # noqa: E402,F401
 import models.masked_policy  # noqa: E402,F401
 import models.gridnet_policy  # noqa: E402,F401
 import environments.curriculum.PPOCurriculum  # noqa: E402,F401
-from trainers.PPOTrainer import PPOTrainer  # noqa: E402
 from trainers.BaseTrainer import resolve_device  # noqa: E402
 
 
-def build_trainer(args) -> PPOTrainer:
+def build_trainer(args):
     cfg = Config.from_experiment(args.exp)
     cfg.apply_overrides(args.set)
-    trainer = PPOTrainer(cfg=cfg)
+    trainer_type = (cfg.trainer or {}).get("type")
+    if not trainer_type:
+        raise ValueError("PPO config requires trainer.type")
+    trainer = build("trainer", type=trainer_type, cfg=cfg)
     if args.device:
         trainer.device = resolve_device(args.device)
     if args.no_wandb:

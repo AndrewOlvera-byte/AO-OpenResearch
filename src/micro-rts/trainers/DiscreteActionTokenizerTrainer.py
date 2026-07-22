@@ -1,4 +1,4 @@
-"""Pretrain the discrete action-JEPA and transferable next-code router."""
+"""Registered trainer for the discrete action-JEPA and next-code router."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import torch  # noqa: E402
 
 from collectors.offline_data import build_mrts_loader, cycle, to_device  # noqa: E402
 from core.config import Config  # noqa: E402
+from core.registry import register  # noqa: E402
 from entrypoints.pretrain_common import (  # noqa: E402
     amp_ctx,
     make_adam,
@@ -67,10 +68,7 @@ def _load_tokenizer(path, device):
     return model, cfg
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    cfg = Config.from_experiment(args.exp)
-    cfg.apply_overrides(args.set)
+def _run(cfg, args):
     torch.manual_seed(int(cfg.run.get("seed", 0)))
     tr, mc = cfg.training or {}, cfg.model or {}
     steps = pick(args.steps, tr.get("steps"), 100000)
@@ -225,6 +223,25 @@ def main(argv=None):
     checkpoints.finish(steps, last, out)
     trainer.finish()
     print(f"[discrete-action-jepa] saved -> {out}")
+
+
+@register("trainer", "discrete_v3_action_tokenizer")
+class DiscreteActionTokenizerTrainer:
+    def __init__(self, cfg, args, **_):
+        self.cfg, self.args = cfg, args
+
+    def train(self):
+        return _run(self.cfg, self.args)
+
+    smoke_test = train
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    cfg = Config.from_experiment(args.exp)
+    cfg.apply_overrides(args.set)
+    trainer = DiscreteActionTokenizerTrainer(cfg, args)
+    return trainer.smoke_test() if args.smoke else trainer.train()
 
 
 if __name__ == "__main__":

@@ -29,12 +29,13 @@ from evaluation.matchplay import build_report, run_match_eval
 from loss.ppo import ppo_loss
 from rewards.rewards import reward_weight
 
-from core.registry import build
+from core.registry import build, register
 
 from .BaseTrainer import BaseTrainer, CollapseError
 from .guards import entropy_fraction, explained_variance, max_entropy
 
 
+@register("trainer", "ppo")
 class PPOTrainer(BaseTrainer):
     def __init__(self, policy=None, cfg=None, *, lr=2.5e-4, epochs=4, minibatches=4,
                  clip=0.2, vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5,

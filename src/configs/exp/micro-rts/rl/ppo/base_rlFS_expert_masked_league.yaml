@@ -30,6 +30,9 @@ run:
   # the repo root / process CWD). Weights only — optimizer, step, and best-metric reset.
   init_from: checkpoints/base_rlFS_expert_masked/best.pt
 
+trainer:
+  type: ppo
+
 model:
   type: cnn_gridnet
   channels: 64

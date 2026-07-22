@@ -29,6 +29,9 @@ run:
   seed: 0
   device: auto
 
+trainer:
+  type: ppo
+
 model:
   type: cnn_gridnet
   channels: 64

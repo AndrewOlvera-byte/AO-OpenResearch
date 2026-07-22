@@ -13,6 +13,8 @@ data: {}
 
 training: {}
 
+trainer: {}
+
 wandb:
   project: micro-rts
   entity: andrewolvera

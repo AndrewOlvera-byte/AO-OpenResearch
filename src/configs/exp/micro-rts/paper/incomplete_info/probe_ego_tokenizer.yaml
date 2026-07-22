@@ -1,4 +1,7 @@
 run: {name: probe_incomplete_ego_tokenizer, seed: 0, device: auto}
+trainer:
+  type: incomplete_ego_tokenizer
+
 model:
   ego_tokenizer: {d_model: 128, d_latent: 320, depth: 2, n_heads: 8, downsample: 2, n_registers: 8, mask_fraction: 0.35, ema_decay: 0.996}
 data:

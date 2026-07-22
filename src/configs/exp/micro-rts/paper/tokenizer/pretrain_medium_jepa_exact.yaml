@@ -9,6 +9,9 @@ run:
 # canonical absolute start tick exactly. The disposable temporal JEPA predictor
 # is grounded through the same decoder at factual and cloned-counterfactual
 # arrivals, so latent predictability cannot hide mechanically incorrect state.
+trainer:
+  type: structured_v2_tokenizer
+
 model:
   type: structured_v2
   tokenizer:

@@ -19,9 +19,6 @@ build — never the loop.  Override the hooks:
 - ``after_step(self)``         -> post-optimizer hook, e.g. EMA (default no-op)
 - ``checkpoint_policy(self)``  -> ``(trainable_only, include_prefixes)`` (default ``(False, ())``)
 
-``run_training`` is kept as a thin shim (in ``incomplete_info_common``) that
-delegates to :meth:`PretrainTrainer.from_prebuilt` so nothing breaks while stages
-are migrated one at a time.
 """
 
 from __future__ import annotations
@@ -50,9 +47,9 @@ class PretrainTrainer(BaseTrainer):
     phase: str = "pretrain"
     task: str = "incomplete_dynamics_paired"
     default_seq_len: int = 64
-    loss_type: str | None = None  # defaults to cfg.model["type"] when None
+    loss_type: str | None = None
 
-    def __init__(self, cfg, args, device=None, *, _defer_build=False):
+    def __init__(self, cfg, args, device=None):
         super().__init__(cfg, device=device or (args.device if args else None)
                          or (cfg.run or {}).get("device", "auto"))
         self.args = args
@@ -60,16 +57,11 @@ class PretrainTrainer(BaseTrainer):
         self._wandb_key = getattr(args, "wandb_key", None)
         self._seed_all(int((cfg.run or {}).get("seed", 0)))
 
-        # Hook state shared with the classmethod shim (see ``from_prebuilt``).
         self.frozen: dict = {}
         self.metadata: dict = {}
-        self._external_after_step = None
         self._trainable_checkpoint_only = False
         self._checkpoint_include_prefixes: tuple = ()
         self.data_path = None
-
-        if _defer_build:
-            return
 
         # Orchestrated build: loaders -> frozen teachers -> model -> loss.
         self.train_loader, self.val_loader, self.data_path = self.build_loaders()
@@ -125,10 +117,18 @@ class PretrainTrainer(BaseTrainer):
     def build_loss(self):
         """Default: compose the registered loss named by ``loss_type`` with the
         ``cfg.training.loss`` coefficient map (each key ``k`` -> kwarg ``k_coef``)."""
-        loss_type = self.loss_type or (self.cfg.model or {}).get("type")
-        coefs = {
-            f"{k}_coef": v for k, v in ((self.cfg.training or {}).get("loss") or {}).items()
-        }
+        loss_cfg = dict((self.cfg.training or {}).get("loss") or {})
+        loss_type = loss_cfg.pop("type", None) or self.loss_type
+        weights = loss_cfg.pop("weights", loss_cfg)
+        if not loss_type:
+            raise ValueError(
+                f"{type(self).__name__} requires training.loss.type or loss_type"
+            )
+        if loss_cfg and weights is not loss_cfg:
+            raise ValueError(
+                f"unsupported training.loss keys for {loss_type!r}: {sorted(loss_cfg)}"
+            )
+        coefs = {f"{k}_coef": v for k, v in weights.items()}
         self._assert_coef_kwargs(loss_type, coefs)
         model = self.model
 
@@ -154,46 +154,10 @@ class PretrainTrainer(BaseTrainer):
         return {}
 
     def after_step(self):
-        if self._external_after_step is not None:
-            self._external_after_step()
+        pass
 
     def checkpoint_policy(self):
         return (self._trainable_checkpoint_only, self._checkpoint_include_prefixes)
-
-    # --------------------------------------------------------------- shim ctor
-    @classmethod
-    def from_prebuilt(
-        cls,
-        cfg,
-        args,
-        model,
-        loss_fn,
-        train_loader,
-        val_loader,
-        device,
-        *,
-        phase,
-        metadata,
-        after_step=None,
-        trainable_checkpoint_only=False,
-        checkpoint_include_prefixes=(),
-    ):
-        """Build a trainer around already-constructed components and run the loop.
-
-        This is the delegation target of the legacy ``run_training`` free function
-        so existing entrypoints keep working unchanged during migration.
-        """
-        self = cls(cfg, args, device=str(device), _defer_build=True)
-        self.phase = phase
-        self.model = model
-        self.loss_fn = loss_fn
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.metadata = metadata
-        self._external_after_step = after_step
-        self._trainable_checkpoint_only = trainable_checkpoint_only
-        self._checkpoint_include_prefixes = tuple(checkpoint_include_prefixes)
-        return self._loop()
 
     # -------------------------------------------------------------- interface
     def train(self):

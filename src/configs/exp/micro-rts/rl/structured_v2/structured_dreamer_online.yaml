@@ -19,6 +19,9 @@ run:
   ckpt_dir: checkpoints
   verbose: true
 
+trainer:
+  type: structured_dreamer
+
 model:
   type: structured_dreamer
   # No world optimizer is constructed in imagination mode. Keep this value as

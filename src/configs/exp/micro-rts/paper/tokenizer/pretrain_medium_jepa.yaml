@@ -6,6 +6,9 @@ run:
 # Reconstruction-anchored, action-conditioned temporal JEPA treatment. The
 # deployed checkpoint contains only the online structured tokenizer; the EMA
 # target and transition predictor are disposable pretraining scaffolding.
+trainer:
+  type: structured_v2_tokenizer
+
 model:
   type: structured_v2
   tokenizer:

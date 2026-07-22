@@ -13,6 +13,9 @@ run:
   ckpt_dir: checkpoints
   verbose: true
 
+trainer:
+  type: incomplete_belief_dreamer
+
 model:
   type: incomplete_belief_dreamer
   belief_checkpoint: checkpoints/pretrain_belief_dynamics_medium_v2/best.pt

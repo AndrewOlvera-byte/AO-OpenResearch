@@ -6,6 +6,9 @@ run:
 # Downstream action-JEPA/router warmup for the exact temporal-JEPA tokenizer.
 # This deliberately keeps the winning action objective and scale unchanged;
 # only the frozen observation-tokenizer representation advances.
+trainer:
+  type: structured_v2_action_tokenizer
+
 model:
   type: structured_action_tokenizer_v2
   action_tokenizer:

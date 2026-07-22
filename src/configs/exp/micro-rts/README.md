@@ -2,21 +2,23 @@
 
 Configs are organized first by training phase and then by model/objective setup.
 Pass the path below `src/configs/exp` to `--exp`, without the `.yaml` suffix.
+Every config selects orchestration explicitly with `trainer.type`; `model.type`
+is reserved for architecture selection.
 
 ## Layout
 
-- `tokenizer/dreamerv4`: legacy DreamerV4 tokenizer experiments.
+- `tokenizer/dreamerv4`: DreamerV4 tokenizer experiments.
 - `tokenizer/structured_v2`: structured state and action tokenizers.
 - `tokenizer/discrete_v3`: hard product-code state tokenizer and categorical
   action-JEPA pretraining.
-- `dynamics/dreamerv4`: legacy DreamerV4 dynamics experiments.
+- `dynamics/dreamerv4`: DreamerV4 dynamics experiments.
 - `dynamics/structured_v2/core`: original structured dynamics objective.
 - `dynamics/structured_v2/dreamer4`: structured Dreamer4 objective.
 - `dynamics/structured_v2/causal_paired`: causal-paired architecture and action-interface ablations.
 - `dynamics/structured_v2/trust_region`: current frozen-router residual world-model setup.
 - `dynamics/discrete_v3`: plain causal next-code transformer with no flow matching.
 - `rl/ppo`: model-free PPO baselines.
-- `rl/dreamerv4`: legacy DreamerV4 RL experiments.
+- `rl/dreamerv4`: DreamerV4 RL experiments.
 - `rl/structured_v2`: structured world-model RL experiments.
 - `rl/smoke`: integration smoke configs.
 

@@ -189,7 +189,13 @@ class GridActionEncoder(nn.Module):
     def _embed(self, action: torch.Tensor, tables: nn.ModuleList) -> torch.Tensor:
         emb = 0.0
         for i, table in enumerate(tables):
-            emb = emb + table(action[..., i].clamp_min(0))        # (BT, H*W, emb)
+            index = action[..., i]
+            # Historical stores and external bots may use negative or oversized
+            # sentinels for an absent component.  No-op is index zero; mapping
+            # invalid sentinels there is both safe and semantically neutral.
+            valid = (index >= 0) & (index < table.num_embeddings)
+            index = torch.where(valid, index, torch.zeros_like(index))
+            emb = emb + table(index)                              # (BT, H*W, emb)
         return emb
 
     def forward(self, action: torch.Tensor, no_action: torch.Tensor | None = None,
