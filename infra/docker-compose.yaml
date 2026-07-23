@@ -1,7 +1,9 @@
 services:
   research:
     build:
-      context: ..            # repo root, so the whole monorepo is the build context
+      # The root context is allow-listed by .dockerignore to only the dependency
+      # manifest and the MicroRTS jar patch. Source/data stay on the host.
+      context: ..
       dockerfile: infra/Dockerfile
     image: ao-openresearch:latest
     container_name: ao-research
@@ -25,6 +27,11 @@ services:
       # Persist collected datasets to the repo's data/ dir while exposing the
       # canonical /data/micro-rts path inside the container (collect_mrts_data.py).
       - ../data:/data
+
+    # Runtime secrets are loaded from the ignored root .env file. They are not
+    # copied into the image or sent in the Docker build context.
+    env_file:
+      - ../.env
 
     stdin_open: true
     tty: true

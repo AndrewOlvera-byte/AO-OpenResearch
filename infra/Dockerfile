@@ -30,14 +30,16 @@ RUN pip install "pip<24.1" "setuptools==65.5.0" "wheel==0.38.4"
 COPY pyproject.toml /workspace/pyproject.toml
 RUN pip install --no-build-isolation -e .
 
-# Copy project code (editable install above already wired up dependencies).
-COPY . /workspace
-
 # Patch gym-microrts' vendored microrts.jar so the pre-reset terminal
 # observation is exposed to Python (stock 0.3.2 auto-resets before Python sees
 # it, starving the world model's continue/win-reward supervision). See
 # infra/microrts-jar-patch/JNIGridnetVecClient.java.
-RUN bash infra/microrts-jar-patch/apply_patch.sh
+COPY infra/microrts-jar-patch /opt/microrts-jar-patch
+RUN bash /opt/microrts-jar-patch/apply_patch.sh \
+    && rm -rf /opt/microrts-jar-patch
+
+# Project source and datasets are intentionally absent from the image. Compose
+# bind-mounts the checkout at /workspace for live development.
 
 # Keep container running for interactive CLI access.
 CMD ["tail", "-f", "/dev/null"]

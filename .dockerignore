@@ -1,0 +1,9 @@
+# The image contains the toolchain and dependencies only. The repository is
+# bind-mounted at /workspace by Compose, so no source, datasets, outputs, Git
+# history, caches, or local secrets belong in the Docker build context.
+**
+!pyproject.toml
+!infra/
+!infra/Dockerfile
+!infra/microrts-jar-patch/
+!infra/microrts-jar-patch/**
