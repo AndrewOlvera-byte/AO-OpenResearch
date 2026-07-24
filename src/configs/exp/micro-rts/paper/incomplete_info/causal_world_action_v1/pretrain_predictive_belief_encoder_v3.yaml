@@ -1,0 +1,123 @@
+run:
+  name: pretrain_causal_world_action_encoder_v3
+  seed: 0
+  device: auto
+
+trainer:
+  type: causal_world_action_encoder
+
+model:
+  type: causal_world_action_encoder
+  predictive_belief:
+    d_model: 512
+    d_latent: 320
+    n_heads: 8
+    frame_depth: 2
+    temporal_depth: 4
+    mixer_depth: 2
+    predictor_depth: 2
+    mlp_ratio: 4.0
+    dropout: 0.0
+    n_self_tokens: 8
+    n_opponent_tokens: 8
+    n_static_tokens: 4
+    n_interaction_tokens: 8
+    context_length: 64
+    horizons: [1, 2, 4, 8, 16]
+    ema_decay: 0.996
+    discount: 0.997
+    event_dim: 8
+    action_conditioning: routed
+    n_action_summary_tokens: 4
+    copy_margin: 0.002
+    # Fixed-scale tokens are the interface consumed by downstream dynamics.
+    normalize_latents: true
+    # Mask source belief tokens only on the online predictor path. The encoder
+    # and EMA target still see the complete observation history.
+    predictor_state_dropout: 0.15
+    action_set_inverse: true
+    counterfactual_preference_margin: 0.1
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+  paired_batch_fraction: 1.0
+  h5_cache_mb: 256
+
+training:
+  source_intent_ckpt: checkpoints/pretrain_opponent_intent_prior_medium_v3/model.pt
+  seq_len: 64
+  # V3 changes the representation geometry itself, so all trainable components
+  # co-adapt from step zero under the fixed-scale causal objective.
+  steps: 120000
+  batch: 10
+  num_workers: 8
+  prefetch_factor: 3
+  persistent_workers: true
+  pin_memory: true
+  amp: true
+  lr: 1.5e-4
+  warmup_steps: 3000
+  lr_min_frac: 0.05
+  weight_decay: 1.0e-4
+  adam_eps: 1.0e-5
+  grad_clip: 5.0
+  loss:
+    type: predictive_belief
+    weights:
+      future_jepa: 1.0
+      variance: 0.0
+      slotwise_variance: 0.0
+      slotwise_scale: 0.05
+      # Raw latent deltas permitted v2's encoder and EMA target to co-scale.
+      future_delta: 0.0
+      normalized_future_delta: 1.0
+      copy_margin: 1.0
+      self_inverse: 0.25
+      action_set_inverse: 0.75
+      opponent_plan: 0.2
+      events: 0.5
+      reward: 0.2
+      return: 0.2
+      continue: 0.05
+      counterfactual: 1.0
+      counterfactual_effect: 2.0
+      counterfactual_preference: 2.0
+  val_frac: 0.05
+  eval_seed: 1729
+  eval_every: 1000
+  eval_batches: 64
+  checkpoint_every: 2500
+  log_every: 25
+  monitor: world_action_encoder/promotion
+  log_metrics:
+    - world_action_encoder/total
+    - world_action_encoder/promotion
+    - world_action_encoder/future_jepa
+    - world_action_encoder/normalized_future_delta
+    - world_action_encoder/copy_jepa
+    - world_action_encoder/copy_gain
+    - world_action_encoder/copy_margin
+    - world_action_encoder/slotwise_scale
+    - world_action_encoder/self_inverse
+    - world_action_encoder/action_set_inverse
+    - world_action_encoder/opponent_plan
+    - world_action_encoder/events
+    - world_action_encoder/reward
+    - world_action_encoder/return
+    - world_action_encoder/continue
+    - world_action_encoder/counterfactual
+    - world_action_encoder/counterfactual_effect
+    - world_action_encoder/counterfactual_effect_cosine
+    - world_action_encoder/counterfactual_preference
+    - world_action_encoder/counterfactual_preference_accuracy
+    - world_action_encoder/counterfactual_preference_gap
+    - world_action_encoder/latent_rms
+  out: checkpoints/pretrain_causal_world_action_encoder_v3/model.pt
+
+wandb:
+  project: ao-openresearch
+  run_name: pretrain_causal_world_action_encoder_v3
+  tags: [micro-rts, incomplete-info, causal-world-action-v3, predictive-belief,
+         fixed-rms, shortcut-forcing, routed-actions, normalized-delta,
+         paired-ranking, action-set-inverse, counterfactual, bf16]

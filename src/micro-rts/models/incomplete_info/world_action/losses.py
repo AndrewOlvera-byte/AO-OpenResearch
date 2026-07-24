@@ -16,6 +16,14 @@ def _jepa(prediction, target):
     return F.smooth_l1_loss(_norm(prediction), _norm(target.detach()))
 
 
+def _masked_jepa(prediction, target, valid):
+    per = F.smooth_l1_loss(
+        _norm(prediction), _norm(target.detach()), reduction="none"
+    ).mean(-1)
+    weight = valid.to(per.dtype)
+    return (per * weight).sum() / weight.sum().clamp_min(1.0)
+
+
 def _event_values(prediction):
     """Convert change-support logits into the semantic event feature space."""
     return torch.cat((prediction[..., :1].sigmoid(), prediction[..., 1:]), dim=-1)
@@ -90,7 +98,13 @@ def predictive_belief_loss(
     *,
     future_jepa_coef=1.0,
     variance_coef=0.05,
+    slotwise_variance_coef=0.0,
+    slotwise_scale_coef=0.0,
+    future_delta_coef=0.0,
+    normalized_future_delta_coef=0.0,
+    copy_margin_coef=0.0,
     self_inverse_coef=0.5,
+    action_set_inverse_coef=0.0,
     opponent_plan_coef=0.5,
     events_coef=0.5,
     reward_coef=0.5,
@@ -98,6 +112,7 @@ def predictive_belief_loss(
     continue_coef=0.1,
     counterfactual_coef=1.0,
     counterfactual_effect_coef=1.0,
+    counterfactual_preference_coef=0.0,
 ):
     encoded = model(batch)
     online, target = encoded["online"], encoded["target"]
@@ -105,11 +120,29 @@ def predictive_belief_loss(
     zero = online["tokens"].new_zeros(())
 
     jepa_parts = []
+    delta_parts = []
+    normalized_delta_parts = []
+    copy_parts = []
     reward_loss = return_loss = continue_loss = zero
     reward_count = 0
     for horizon, prediction in encoded["predictions"].items():
         target_tokens = target["tokens"][:, horizon:]
+        source_tokens = online["tokens"][:, :-horizon]
+        source_target = target["tokens"][:, :-horizon]
         jepa_parts.append(_jepa(prediction, target_tokens))
+        copy_parts.append(_jepa(source_tokens, target_tokens))
+        delta_parts.append(
+            F.smooth_l1_loss(
+                (prediction.float() - source_tokens.float()),
+                (target_tokens.float() - source_target.float()).detach(),
+            )
+        )
+        normalized_delta_parts.append(
+            F.smooth_l1_loss(
+                _norm(prediction) - _norm(source_tokens),
+                (_norm(target_tokens) - _norm(source_target)).detach(),
+            )
+        )
         scalar = model.scalar_predictions(prediction)
         returns = _window_sum(batch["reward"], horizon, cfg.discount)
         continues = torch.stack(
@@ -127,11 +160,26 @@ def predictive_belief_loss(
         if horizon == 1:
             reward_loss = F.smooth_l1_loss(scalar[..., 0], batch["reward"][:, :-1])
     jepa = torch.stack(jepa_parts).mean()
+    future_delta = torch.stack(delta_parts).mean()
+    normalized_future_delta = torch.stack(normalized_delta_parts).mean()
+    copy_jepa = torch.stack(copy_parts).mean()
+    copy_gain = copy_jepa - jepa
+    copy_margin = F.relu(jepa - copy_jepa.detach() + float(cfg.copy_margin))
     return_loss = return_loss / max(reward_count, 1)
     continue_loss = continue_loss / max(reward_count, 1)
 
     flat = online["tokens"].float().flatten(0, -2)
     variance = F.relu(1.0 - flat.std(0, unbiased=False)).mean()
+    # V1 flattened the token axis too, allowing constant slot identities to
+    # satisfy the variance floor. V2 measures variation independently for
+    # every semantic slot over only batch and time.
+    slot_flat = online["tokens"].float().flatten(0, 1)
+    slotwise_variance = F.relu(
+        1.0 - slot_flat.std(0, unbiased=False)
+    ).mean()
+    slot_mean = slot_flat.mean(0)
+    slot_std = slot_flat.std(0, unbiased=False)
+    slotwise_scale = (slot_std - 1.0).square().mean() + 0.1 * slot_mean.square().mean()
 
     pred1 = encoded["predictions"][1]
     future = split_branches(pred1, cfg.branch_sizes)
@@ -139,6 +187,16 @@ def predictive_belief_loss(
     inverse_prediction = model.inverse_action(source["self"], future["self"])
     inverse_target = encoded["action_pool"][:, :-1]
     inverse = _jepa(inverse_prediction, inverse_target)
+    action_set_inverse = zero
+    if model.action_set_inverse is not None:
+        action_set_prediction = model.inverse_action_set(
+            source["self"], future["self"]
+        )
+        action_set_inverse = _masked_jepa(
+            action_set_prediction,
+            encoded["action_tokens"][:, :-1],
+            encoded["action_valid"][:, :-1],
+        )
 
     anchors = batch["state"].shape[1] - model.opponent_tokenizer.max_horizon
     with torch.no_grad():
@@ -159,6 +217,7 @@ def predictive_belief_loss(
     event = _sparse_event_loss(event_prediction, factual_target)
 
     counterfactual = counterfactual_effect = effect_cosine = zero
+    counterfactual_preference = preference_accuracy = preference_gap = zero
     if "counterfactual_valid" in batch:
         cf_prediction_tokens = model.predict_counterfactual(encoded, batch)
         cf_parts = split_branches(cf_prediction_tokens, cfg.branch_sizes)
@@ -203,11 +262,46 @@ def predictive_belief_loss(
             + 0.25 * magnitude
         )
         effect_cosine = (cosine * active).sum() / active_denom
+        factual_values = _event_values(event_prediction).float()
+        counterfactual_values = _event_values(cf_prediction).float()
+        correct = (
+            (factual_values - factual_target.float()).square().mean((-1, -2))
+            + (counterfactual_values - cf_target.float()).square().mean((-1, -2))
+        )
+        swapped = (
+            (factual_values - cf_target.float()).square().mean((-1, -2))
+            + (counterfactual_values - factual_target.float()).square().mean((-1, -2))
+        )
+        # Normalize by intervention energy. Raw event MSE gaps are tiny because
+        # only a few map patches change, which otherwise makes the causal rank
+        # term numerically irrelevant next to the global objectives.
+        intervention_energy = (
+            (cf_target.float() - factual_target.float())
+            .square()
+            .mean((-1, -2))
+            .clamp_min(1e-6)
+        )
+        correct = correct / intervention_energy
+        swapped = swapped / intervention_energy
+        margin = float(cfg.counterfactual_preference_margin)
+        counterfactual_preference = (
+            F.relu(margin + correct - swapped) * active
+        ).sum() / active_denom
+        preference_accuracy = (
+            (correct < swapped).to(active.dtype) * active
+        ).sum() / active_denom
+        preference_gap = ((swapped - correct) * active).sum() / active_denom
 
     total = (
         float(future_jepa_coef) * jepa
         + float(variance_coef) * variance
+        + float(slotwise_variance_coef) * slotwise_variance
+        + float(slotwise_scale_coef) * slotwise_scale
+        + float(future_delta_coef) * future_delta
+        + float(normalized_future_delta_coef) * normalized_future_delta
+        + float(copy_margin_coef) * copy_margin
         + float(self_inverse_coef) * inverse
+        + float(action_set_inverse_coef) * action_set_inverse
         + float(opponent_plan_coef) * opponent
         + float(events_coef) * event
         + float(reward_coef) * reward_loss
@@ -215,12 +309,21 @@ def predictive_belief_loss(
         + float(continue_coef) * continue_loss
         + float(counterfactual_coef) * counterfactual
         + float(counterfactual_effect_coef) * counterfactual_effect
+        + float(counterfactual_preference_coef) * counterfactual_preference
     )
     metrics = {
         "world_action_encoder/total": total.detach(),
         "world_action_encoder/future_jepa": jepa.detach(),
         "world_action_encoder/variance": variance.detach(),
+        "world_action_encoder/slotwise_variance": slotwise_variance.detach(),
+        "world_action_encoder/slotwise_scale": slotwise_scale.detach(),
+        "world_action_encoder/future_delta": future_delta.detach(),
+        "world_action_encoder/normalized_future_delta": normalized_future_delta.detach(),
+        "world_action_encoder/copy_jepa": copy_jepa.detach(),
+        "world_action_encoder/copy_gain": copy_gain.detach(),
+        "world_action_encoder/copy_margin": copy_margin.detach(),
         "world_action_encoder/self_inverse": inverse.detach(),
+        "world_action_encoder/action_set_inverse": action_set_inverse.detach(),
         "world_action_encoder/opponent_plan": opponent.detach(),
         "world_action_encoder/events": event.detach(),
         "world_action_encoder/reward": reward_loss.detach(),
@@ -229,8 +332,22 @@ def predictive_belief_loss(
         "world_action_encoder/counterfactual": counterfactual.detach(),
         "world_action_encoder/counterfactual_effect": counterfactual_effect.detach(),
         "world_action_encoder/counterfactual_effect_cosine": effect_cosine.detach(),
+        "world_action_encoder/counterfactual_preference": (
+            counterfactual_preference.detach()
+        ),
+        "world_action_encoder/counterfactual_preference_accuracy": (
+            preference_accuracy.detach()
+        ),
+        "world_action_encoder/counterfactual_preference_gap": preference_gap.detach(),
         "world_action_encoder/latent_rms": online["tokens"].float().square().mean().sqrt().detach(),
     }
+    metrics["world_action_encoder/promotion"] = (
+        jepa.detach()
+        + copy_margin.detach()
+        + 0.5 * counterfactual_effect.detach()
+        + counterfactual_preference.detach()
+        + 0.25 * slotwise_variance.detach()
+    )
     return total, metrics
 
 

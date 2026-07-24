@@ -72,9 +72,42 @@ class WorldActionEncoderTrainer(PretrainTrainer):
         return {"ego": ego, "self_action": action, "opponent": opponent}
 
     def build_model(self):
-        return PredictiveBeliefPretrainer(
+        model = PredictiveBeliefPretrainer(
             self.frozen["ego"], self.frozen["self_action"], self.frozen["opponent"], self.belief_cfg
         ).to(self.device)
+        init_from = (self.cfg.training or {}).get("init_from")
+        self._init_from = None
+        self._init_prefixes = ()
+        if init_from:
+            init_path = resolve_path(init_from)
+            prefixes = tuple(
+                str(value)
+                for value in (self.cfg.training or {}).get("init_prefixes", ())
+            )
+            if prefixes:
+                checkpoint = torch.load(
+                    init_path, map_location="cpu", weights_only=False
+                )
+                state = checkpoint.get("model", checkpoint)
+                selected = {
+                    name: value
+                    for name, value in state.items()
+                    if any(name.startswith(prefix) for prefix in prefixes)
+                }
+                if not selected:
+                    raise ValueError(
+                        f"{init_path}: no weights match init_prefixes={prefixes}"
+                    )
+                _, unexpected = model.load_state_dict(selected, strict=False)
+                if unexpected:
+                    raise ValueError(
+                        f"{init_path}: unexpected warm-start weights {unexpected}"
+                    )
+                self._init_prefixes = prefixes
+            else:
+                load_stage_weights(model, init_path)
+            self._init_from = str(init_path)
+        return model
 
     def after_step(self):
         self.model.update_target()
@@ -105,4 +138,6 @@ class WorldActionEncoderTrainer(PretrainTrainer):
             ),
             "data": str(self.data_path),
             "architecture": "CausalWorldAction-v1",
+            "init_from": self._init_from,
+            "init_prefixes": self._init_prefixes,
         }

@@ -8,7 +8,7 @@ from models.incomplete_info.world_action import (
     PredictiveBeliefConfig,
     WorldActionBeliefEncoder,
 )
-from models.incomplete_info.world_action.encoder import split_branches
+from models.incomplete_info.world_action.encoder import MultiHorizonPredictor, split_branches
 from models.incomplete_info.world_action.losses import semantic_transition_target
 
 
@@ -48,6 +48,49 @@ def test_factorized_encoder_shapes_and_causal_history():
     assert first["opponent"].shape[-2] == cfg.n_opponent_tokens
     # Causal temporal SDPA prevents the final action from changing prior rows.
     torch.testing.assert_close(first["tokens"][:, :-1], second["tokens"][:, :-1])
+
+
+def test_normalized_encoder_exports_fixed_scale_tokens():
+    torch.manual_seed(3)
+    cfg = tiny_belief_cfg()
+    cfg.normalize_latents = True
+    model = WorldActionBeliefEncoder(24, 16, cfg).eval()
+    output = model(
+        torch.randn(2, 5, 4, 24),
+        torch.ones(2, 5, 4, 1),
+        torch.randn(2, 5, 3, 16),
+        torch.ones(2, 5, 3, dtype=torch.bool),
+    )["tokens"].float()
+
+    torch.testing.assert_close(
+        output.mean(-1), torch.zeros_like(output.mean(-1)), atol=1e-5, rtol=0
+    )
+    torch.testing.assert_close(
+        output.square().mean(-1),
+        torch.ones_like(output[..., 0]),
+        atol=1e-4,
+        rtol=0,
+    )
+
+
+def test_routed_predictor_preserves_action_time_order():
+    torch.manual_seed(7)
+    cfg = tiny_belief_cfg()
+    cfg.action_conditioning = "routed"
+    cfg.n_action_summary_tokens = 2
+    predictor = MultiHorizonPredictor(16, cfg).eval()
+    belief = torch.randn(2, 5, cfg.n_tokens, cfg.d_latent)
+    action = torch.randn(2, 5, 3, 16)
+    valid = torch.ones(2, 5, 3, dtype=torch.bool)
+    pool = action.mean(-2)
+
+    forward = predictor(belief, pool, action, valid)
+    reversed_action = action.flip(1)
+    reversed_pool = reversed_action.mean(-2)
+    reversed_ = predictor(belief, reversed_pool, reversed_action, valid)
+
+    assert forward[2].shape == (2, 3, cfg.n_tokens, cfg.d_latent)
+    assert not torch.allclose(forward[2], reversed_[2])
 
 
 def test_opponent_flow_has_no_simultaneous_ego_action_path():

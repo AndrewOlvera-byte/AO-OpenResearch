@@ -30,6 +30,19 @@ class PredictiveBeliefConfig:
     ema_decay: float = 0.996
     discount: float = 0.997
     event_dim: int = 8
+    # ``pooled`` is the checkpoint-compatible v1 path. ``routed`` first
+    # resamples the issued action-event set into a few tokens per frame, then
+    # lets every belief token attend to the full, time-ordered horizon window.
+    action_conditioning: str = "pooled"
+    n_action_summary_tokens: int = 4
+    # V2's predictive gate explicitly requires beating the persistence prior.
+    copy_margin: float = 0.002
+    # V3 exports a fixed-scale belief interface and prevents the predictor from
+    # solving every update through the fully observed source state.
+    normalize_latents: bool = False
+    predictor_state_dropout: float = 0.0
+    action_set_inverse: bool = False
+    counterfactual_preference_margin: float = 0.1
 
     @classmethod
     def from_dict(cls, values):
