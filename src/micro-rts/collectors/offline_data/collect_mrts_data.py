@@ -314,6 +314,7 @@ def main(argv=None) -> int:
                         store_full_state=args.full_state,
                         state_shape=(base_env._grid_cells, 16),
                         store_counterfactual=args.counterfactual_frac > 0,
+                        store_counterfactual_obs=args.counterfactual_frac > 0,
                     )
                 elif cur != shapes:
                     raise SystemExit(

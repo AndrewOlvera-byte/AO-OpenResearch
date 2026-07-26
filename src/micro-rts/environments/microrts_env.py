@@ -301,7 +301,7 @@ class MicroRTSVecEnv(VecEnv):
 
     def counterfactual(
         self, actions: torch.Tensor, opponent_actions: torch.Tensor, valid: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """One cloned-engine step from the most recent departure state.
 
         Call after ``step``: the patched Java client retained that step's exact
@@ -318,11 +318,18 @@ class MicroRTSVecEnv(VecEnv):
             self._encode_gridnet_components(opponent_actions),
             flags,
         )
+        obs = np.asarray(
+            self._env.vec_client.counterfactualObservation, dtype=np.int32
+        )
         state = np.asarray(self._env.vec_client.counterfactualFullState, dtype=np.int32)
         glob = np.asarray(
             self._env.vec_client.counterfactualFullGlobals, dtype=np.int32
         )
-        return torch.from_numpy(state.copy()), torch.from_numpy(glob.copy())
+        return (
+            self._encode(obs.copy()),
+            torch.from_numpy(state.copy()),
+            torch.from_numpy(glob.copy()),
+        )
 
     def send(self, actions: torch.Tensor) -> None:
         obs, reward, done, infos = self._env.step(self._encode_action(actions))

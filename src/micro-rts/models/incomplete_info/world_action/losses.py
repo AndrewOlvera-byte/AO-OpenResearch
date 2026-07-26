@@ -111,6 +111,7 @@ def predictive_belief_loss(
     return_coef=0.5,
     continue_coef=0.1,
     counterfactual_coef=1.0,
+    counterfactual_belief_coef=1.0,
     counterfactual_effect_coef=1.0,
     counterfactual_preference_coef=0.0,
 ):
@@ -348,6 +349,250 @@ def predictive_belief_loss(
         + counterfactual_preference.detach()
         + 0.25 * slotwise_variance.detach()
     )
+    return total, metrics
+
+
+@register("loss", "direct_causal_world_action_dynamics")
+def direct_causal_world_action_dynamics_loss(
+    model,
+    batch,
+    *,
+    factual_coef=1.0,
+    copy_margin_coef=1.0,
+    events_coef=0.5,
+    counterfactual_coef=1.0,
+    counterfactual_effect_coef=2.0,
+    counterfactual_effect_cosine_coef=0.05,
+    counterfactual_effect_norm_coef=0.02,
+    counterfactual_preference_coef=1.0,
+    correction_coef=0.25,
+    reward_coef=0.2,
+    return_coef=0.2,
+    continue_coef=0.05,
+):
+    """Structured-v2-style direct residual objective in predictive-belief space."""
+    encoded = model(batch)
+    length = encoded["length"]
+    departure = encoded["belief"][:, :length]
+    target = encoded["belief"][:, 1:length + 1].detach()
+    action = encoded["action"][:, :length]
+    valid = encoded["valid"][:, :length]
+    plan = encoded["plan"][:, :length]
+    cf_action = cf_valid = cf_prediction_tokens = None
+    if "counterfactual_valid" in batch:
+        cf_action, cf_valid = model.encode_actions(batch, "counterfactual_action")
+        pair_prediction = model.dynamics(
+            torch.cat((departure, departure), dim=0),
+            torch.cat((action, cf_action[:, :length]), dim=0),
+            torch.cat((valid, cf_valid[:, :length]), dim=0),
+            torch.cat((plan, plan), dim=0),
+        )
+        prediction, cf_prediction_tokens = pair_prediction.chunk(2, dim=0)
+    else:
+        prediction = model.dynamics(departure, action, valid, plan)
+
+    factual = _jepa(prediction, target)
+    copy = _jepa(departure, target)
+    copy_gain = copy - factual
+    copy_margin = F.relu(factual - copy.detach() + 0.002)
+    correction = (prediction.float() - departure.float()).square().mean()
+
+    state = batch["state"][:, :length]
+    next_state = batch["next_state"][:, :length]
+    globals_ = batch["globals"][:, :length]
+    next_globals = batch["next_globals"][:, :length]
+    factual_target = semantic_transition_target(
+        state,
+        next_state,
+        globals_,
+        next_globals,
+        model.ego_tokenizer.cfg.downsample,
+    )
+    interaction = split_branches(prediction, model.dyn_cfg.branch_sizes)["interaction"]
+    event_prediction = model.event_head(interaction)
+    events = _sparse_event_loss(event_prediction, factual_target)
+
+    scalar = model.scalar_predictions(prediction)
+    reward_loss = F.smooth_l1_loss(
+        scalar[..., 0], batch["reward"][:, :length]
+    )
+    return_loss = F.smooth_l1_loss(
+        scalar[..., 1], batch["reward"][:, :length]
+    )
+    continue_loss = F.binary_cross_entropy_with_logits(
+        scalar[..., 2], batch["cont"][:, :length]
+    )
+
+    zero = factual.new_zeros(())
+    counterfactual = counterfactual_belief = effect_loss = effect_cosine = zero
+    effect_cosine_loss = effect_norm_loss = zero
+    preference = preference_accuracy = preference_gap = zero
+    if "counterfactual_valid" in batch:
+        factual_values = _event_values(
+            model.event_head(
+                split_branches(
+                    prediction, model.dyn_cfg.branch_sizes
+                )["interaction"]
+            )
+        )
+        cf_values = _event_values(
+            model.event_head(
+                split_branches(
+                    cf_prediction_tokens, model.dyn_cfg.branch_sizes
+                )["interaction"]
+            )
+        )
+        cf_target = semantic_transition_target(
+            state,
+            batch["counterfactual_next_state"][:, :length],
+            globals_,
+            batch["counterfactual_next_globals"][:, :length],
+            model.ego_tokenizer.cfg.downsample,
+        )
+        active = batch["counterfactual_valid"][:, :length].float()
+        counterfactual = _sparse_event_loss(
+            model.event_head(
+                split_branches(
+                    cf_prediction_tokens, model.dyn_cfg.branch_sizes
+                )["interaction"]
+            ),
+            cf_target,
+            active,
+        )
+        predicted_effect = cf_values.float() - factual_values.float()
+        target_effect = cf_target.float() - factual_target.float()
+        active = active * (
+            target_effect.flatten(-2).norm(dim=-1) > 1e-5
+        ).float()
+        denom = active.sum().clamp_min(1.0)
+        predicted_flat = predicted_effect.flatten(-2)
+        target_flat = target_effect.flatten(-2)
+        predicted_norm = predicted_flat.norm(dim=-1)
+        target_norm = target_flat.norm(dim=-1)
+        # A zero-initialized residual has exactly zero intervention norm. A
+        # conventional cosine divides its first gradient by eps and produces a
+        # destructive spike. The fixed floor preserves a bounded direction
+        # gradient until the event losses establish a nonzero correction.
+        cosine = (
+            (predicted_flat * target_flat).sum(-1)
+            / (
+                predicted_norm.clamp_min(0.1)
+                * target_norm.clamp_min(1e-6)
+            )
+        )
+        effect_cosine = (cosine * active).sum() / denom
+        effect_cosine_loss = 1.0 - effect_cosine
+        patch_weight = 0.05 + 8.0 * (
+            target_effect.abs().amax(-1) > 1e-6
+        ).float()
+        effect_loss = (
+            (
+                (predicted_effect - target_effect)
+                .square()
+                .mean(-1)
+                * patch_weight
+            )
+            .sum(-1)
+            / patch_weight.sum(-1)
+            * active
+        ).sum() / denom
+        effect_norm_loss = (
+            F.smooth_l1_loss(
+                predicted_norm.clamp_min(1e-3).log(),
+                target_norm.clamp_min(1e-3).log(),
+                reduction="none",
+            )
+            * active
+        ).sum() / denom
+        correct = (
+            (factual_values - factual_target.float()).square().mean((-1, -2))
+            + (cf_values - cf_target.float()).square().mean((-1, -2))
+        )
+        swapped = (
+            (factual_values - cf_target.float()).square().mean((-1, -2))
+            + (cf_values - factual_target.float()).square().mean((-1, -2))
+        )
+        energy = (
+            (cf_target.float() - factual_target.float())
+            .square()
+            .mean((-1, -2))
+            .clamp_min(1e-6)
+        )
+        correct, swapped = correct / energy, swapped / energy
+        preference = (
+            F.relu(0.1 + correct - swapped) * active
+        ).sum() / denom
+        preference_accuracy = (
+            (correct < swapped).to(active.dtype) * active
+        ).sum() / denom
+        preference_gap = ((swapped - correct) * active).sum() / denom
+        if "counterfactual_local_obs" in batch:
+            # Pick the best-populated common anchor. This adds one frozen
+            # teacher pass per batch, instead of B*T separate history passes.
+            counts = batch["counterfactual_valid"][:, :length].sum(0)
+            anchor = int(counts.argmax().item())
+            anchor_active = batch["counterfactual_valid"][:, anchor].float()
+            cf_belief_target = model.counterfactual_belief_target(
+                batch, encoded, anchor
+            ).detach()
+            per_row = (
+                cf_prediction_tokens[:, anchor].float()
+                - cf_belief_target.float()
+            ).square().mean((-1, -2))
+            counterfactual_belief = (
+                per_row * anchor_active
+            ).sum() / anchor_active.sum().clamp_min(1.0)
+
+    total = (
+        float(factual_coef) * factual
+        + float(copy_margin_coef) * copy_margin
+        + float(events_coef) * events
+        + float(counterfactual_coef) * counterfactual
+        + float(counterfactual_belief_coef) * counterfactual_belief
+        + float(counterfactual_effect_coef) * effect_loss
+        + float(counterfactual_effect_cosine_coef) * effect_cosine_loss
+        + float(counterfactual_effect_norm_coef) * effect_norm_loss
+        + float(counterfactual_preference_coef) * preference
+        + float(correction_coef) * correction
+        + float(reward_coef) * reward_loss
+        + float(return_coef) * return_loss
+        + float(continue_coef) * continue_loss
+    )
+    metrics = {
+        "direct_world_action/total": total.detach(),
+        "direct_world_action/factual": factual.detach(),
+        "direct_world_action/copy": copy.detach(),
+        "direct_world_action/copy_gain": copy_gain.detach(),
+        "direct_world_action/copy_margin": copy_margin.detach(),
+        "direct_world_action/correction": correction.detach(),
+        "direct_world_action/events": events.detach(),
+        "direct_world_action/counterfactual": counterfactual.detach(),
+        "direct_world_action/counterfactual_belief": (
+            counterfactual_belief.detach()
+        ),
+        "direct_world_action/counterfactual_effect": effect_loss.detach(),
+        "direct_world_action/counterfactual_effect_cosine": effect_cosine.detach(),
+        "direct_world_action/counterfactual_effect_cosine_loss": (
+            effect_cosine_loss.detach()
+        ),
+        "direct_world_action/counterfactual_effect_norm_loss": (
+            effect_norm_loss.detach()
+        ),
+        "direct_world_action/counterfactual_preference": preference.detach(),
+        "direct_world_action/counterfactual_preference_accuracy": (
+            preference_accuracy.detach()
+        ),
+        "direct_world_action/counterfactual_preference_gap": preference_gap.detach(),
+        "direct_world_action/reward": reward_loss.detach(),
+        "direct_world_action/return": return_loss.detach(),
+        "direct_world_action/continue": continue_loss.detach(),
+        "direct_world_action/intent_mode_entropy": (
+            -(encoded["mode_probabilities"] * encoded["mode_probabilities"].clamp_min(1e-8).log())
+            .sum(-1)
+            .mean()
+            .detach()
+        ),
+    }
     return total, metrics
 
 

@@ -77,6 +77,7 @@ _DTYPES = {
     "next_globals": np.int32,
     "counterfactual_action": np.uint8,
     "counterfactual_opponent_action": np.uint8,
+    "counterfactual_obs": np.uint8,
     "counterfactual_next_state": np.int32,
     "counterfactual_next_globals": np.int32,
     "counterfactual_valid": np.bool_,
@@ -117,6 +118,7 @@ class HDF5Writer:
         state_shape=None,
         globals_shape=(8,),
         store_counterfactual=False,
+        store_counterfactual_obs=False,
     ):
         import h5py  # local import: only the writer process/thread needs it
 
@@ -132,6 +134,9 @@ class HDF5Writer:
         self.state_shape = tuple(int(x) for x in state_shape) if state_shape else None
         self.globals_shape = tuple(int(x) for x in globals_shape)
         self.store_counterfactual = bool(store_counterfactual)
+        self.store_counterfactual_obs = bool(store_counterfactual_obs)
+        if self.store_counterfactual_obs and not self.store_counterfactual:
+            raise ValueError("counterfactual observations require counterfactual storage")
         if self.store_full_state and self.state_shape is None:
             raise ValueError("store_full_state=True requires state_shape")
         structured = (
@@ -143,6 +148,7 @@ class HDF5Writer:
             (
                 "counterfactual_action",
                 "counterfactual_opponent_action",
+                *(("counterfactual_obs",) if self.store_counterfactual_obs else ()),
                 "counterfactual_next_state",
                 "counterfactual_next_globals",
                 "counterfactual_valid",
@@ -197,6 +203,7 @@ class HDF5Writer:
             if self.store_full_state
             else [],
             has_counterfactual=self.store_counterfactual,
+            has_counterfactual_obs=self.store_counterfactual_obs,
             action_nvec=list(int(x) for x in action_nvec),
             grid_hw=list(int(x) for x in grid_hw),
             reward_weight=list(float(x) for x in reward_weight),
@@ -316,6 +323,7 @@ class HDF5Writer:
             "next_globals": self.globals_shape,
             "counterfactual_action": self.action_shape,
             "counterfactual_opponent_action": self.action_shape,
+            "counterfactual_obs": self.obs_shape,
             "counterfactual_next_state": self.state_shape,
             "counterfactual_next_globals": self.globals_shape,
             "counterfactual_valid": (),

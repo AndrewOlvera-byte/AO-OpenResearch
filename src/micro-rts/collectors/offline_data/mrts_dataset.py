@@ -193,6 +193,24 @@ _TASK_FIELDS = {
         "done",
         "is_first",
     ),
+    "incomplete_dynamics_paired_cf_belief": (
+        "state",
+        "globals",
+        "next_state",
+        "next_globals",
+        "action",
+        "opponent_action",
+        "counterfactual_action",
+        "counterfactual_opponent_action",
+        "counterfactual_next_state",
+        "counterfactual_next_globals",
+        "counterfactual_ego_obs",
+        "counterfactual_ego_visibility",
+        "counterfactual_valid",
+        "reward",
+        "done",
+        "is_first",
+    ),
 }
 
 
@@ -486,6 +504,13 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         for name in ("counterfactual_next_state", "counterfactual_next_globals"):
             if name in self.fields:
                 out[name] = torch.from_numpy(f[name][s:e].astype(np.int64))
+        if "counterfactual_ego_obs" in self.fields:
+            out["counterfactual_local_obs"] = torch.from_numpy(
+                f["counterfactual_ego_obs"][s:e].astype(np.float32)
+            )
+            out["counterfactual_local_visibility"] = torch.from_numpy(
+                f["counterfactual_ego_visibility"][s:e].astype(bool)
+            )
         if "counterfactual_valid" in self.fields:
             out["counterfactual_valid"] = torch.from_numpy(
                 f["counterfactual_valid"][s:e].astype(bool)

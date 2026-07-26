@@ -1,0 +1,78 @@
+run:
+  name: pretrain_direct_world_action_dynamics_no_opp_z_v1
+  seed: 0
+  device: auto
+
+trainer:
+  type: direct_causal_world_action_dynamics
+
+model:
+  type: direct_causal_world_action_dynamics
+  direct_dynamics:
+    d_model: 512
+    d_latent: 320
+    n_heads: 8
+    depth: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    n_self_tokens: 8
+    n_opponent_tokens: 8
+    n_static_tokens: 4
+    n_interaction_tokens: 8
+    condition_on_opponent_intent: false
+
+data:
+  path: /data/micro-rts/wm_v2_pretrain__20260713-030227__5a273944__fog_v1.h5
+  observation_mode: ego
+  paired_batch_fraction: 1.0
+  h5_cache_mb: 256
+
+training:
+  belief_encoder_ckpt: checkpoints/pretrain_causal_world_action_encoder_v3/best.pt
+  intent_prior_ckpt: checkpoints/pretrain_opponent_intent_prior_medium_v3/model.pt
+  exact_counterfactual_belief: false
+  seq_len: 64
+  steps: 100000
+  batch: 10
+  num_workers: 8
+  prefetch_factor: 3
+  persistent_workers: true
+  pin_memory: true
+  amp: true
+  lr: 1.0e-4
+  warmup_steps: 2000
+  lr_min_frac: 0.05
+  weight_decay: 1.0e-4
+  adam_eps: 1.0e-5
+  grad_clip: 5.0
+  loss:
+    type: direct_causal_world_action_dynamics
+    weights:
+      factual: 1.0
+      copy_margin: 1.0
+      events: 0.5
+      counterfactual: 1.0
+      counterfactual_belief: 0.25
+      counterfactual_effect: 2.0
+      counterfactual_effect_cosine: 0.05
+      counterfactual_effect_norm: 0.02
+      counterfactual_preference: 1.0
+      correction: 0.25
+      reward: 0.2
+      return: 0.2
+      continue: 0.05
+  val_frac: 0.05
+  eval_seed: 1729
+  eval_every: 500
+  eval_batches: 64
+  checkpoint_every: 2500
+  log_every: 25
+  monitor: direct_world_action/total
+  out: checkpoints/pretrain_direct_world_action_dynamics_no_opp_z_v1/model.pt
+
+wandb:
+  project: ao-openresearch
+  run_name: pretrain_direct_world_action_dynamics_no_opp_z_v1
+  tags: [micro-rts, incomplete-info, direct-residual, causal-paired,
+         frozen-belief-v3, opp-z-ablated, structured-v2-objective,
+         no-flow-integration, bf16, flash-sdpa]

@@ -125,13 +125,14 @@ class OfflineCollector:
                 if self._cf_policy is not None:
                     alt = self._cf_policy.step(obs, mask)["action"]
                     valid = torch.rand(n) < self.counterfactual_frac
-                    cf_state, cf_globals = self.env.counterfactual(
+                    cf_obs, cf_state, cf_globals = self.env.counterfactual(
                         alt, opp_action, valid
                     )
                     batch.update(
                         {
                             "counterfactual_action": alt,
                             "counterfactual_opponent_action": opp_action,
+                            "counterfactual_obs": cf_obs,
                             "counterfactual_next_state": cf_state,
                             "counterfactual_next_globals": cf_globals,
                             "counterfactual_valid": valid,

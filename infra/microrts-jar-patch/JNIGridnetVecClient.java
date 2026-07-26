@@ -85,6 +85,7 @@ public class JNIGridnetVecClient {
     public int[][][] terminalFullState;
     public int[][] terminalFullGlobals;
     // Counterfactual one-step arrival populated by computeCounterfactual().
+    public int[][][][] counterfactualObservation;
     public int[][][] counterfactualFullState;
     public int[][] counterfactualFullGlobals;
     private GameState[] counterfactualSource;
@@ -133,6 +134,7 @@ public class JNIGridnetVecClient {
         this.terminalFullGlobals = new int[n5][8];
         this.counterfactualFullState = new int[n5][this.gridCells][16];
         this.counterfactualFullGlobals = new int[n5][8];
+        this.counterfactualObservation = new int[n5][n6][n7][n8];
         this.counterfactualSource = new GameState[n5];
         this.playerIds = new int[n5];
         this.responses = new Responses(null, null, null);
@@ -314,6 +316,10 @@ public class JNIGridnetVecClient {
         int selfLanes = this.selfPlayClients.length * 2;
         for (int lane = 0; lane < this.rs.length; ++lane) {
             if (lane >= valid.length || !valid[lane]) {
+                this.counterfactualObservation[lane] =
+                    new int[this.observation[lane].length]
+                           [this.observation[lane][0].length]
+                           [this.observation[lane][0][0].length];
                 this.counterfactualFullState[lane] = new int[this.gridCells][16];
                 this.counterfactualFullGlobals[lane] = new int[8];
                 continue;
@@ -341,6 +347,8 @@ public class JNIGridnetVecClient {
             branch.issueSafe(paSelf);
             branch.issueSafe(paOpp);
             branch.cycle();
+            this.counterfactualObservation[lane] =
+                copyObs(iface.getObservation(perspective, branch));
             this.counterfactualFullState[lane] = encodeFullState(branch, perspective);
             this.counterfactualFullGlobals[lane] = encodeFullGlobals(branch, perspective);
         }

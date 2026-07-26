@@ -23,6 +23,7 @@ from . import StructuredDreamerRLTrainer  # noqa: F401
 from . import incomplete_dynamics_trainers  # noqa: F401
 from . import incomplete_tokenizer_trainers  # noqa: F401
 from . import WorldActionDynamicsTrainer  # noqa: F401
+from . import DirectWorldActionDynamicsTrainer  # noqa: F401
 from . import WorldActionEncoderTrainer  # noqa: F401
 from . import StructuredActionTokenizerTrainer  # noqa: F401
 from . import TokenizerTrainers  # noqa: F401

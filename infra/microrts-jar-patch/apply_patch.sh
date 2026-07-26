@@ -31,7 +31,7 @@ echo "[patch] updated $(basename "$JAR") with:"
 unzip -l "$JAR" | grep -E "tests/JNIGridnetVecClient" || true
 
 # Smoke check: every patched field/method must be visible on the class.
-for sym in terminalObservation opponentAction playerIds setPlayerIds fullState fullGlobals terminalFullState terminalFullGlobals counterfactualFullState counterfactualFullGlobals computeCounterfactual; do
+for sym in terminalObservation opponentAction playerIds setPlayerIds fullState fullGlobals terminalFullState terminalFullGlobals counterfactualObservation counterfactualFullState counterfactualFullGlobals computeCounterfactual; do
     javap -cp "$JAR" tests.JNIGridnetVecClient | grep -q "$sym" \
         && echo "[patch] OK: $sym present" \
         || { echo "[patch] FAIL: $sym missing"; exit 1; }

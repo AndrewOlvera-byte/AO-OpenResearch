@@ -44,6 +44,10 @@ from collectors.offline_data.fog_of_war import (
 FOG_VERSION = 1
 ENGINE_COMMIT = "72f2fd94039adf3323f4591947e98661a572f927"
 NEW_DATASETS = ("ego_obs", "ego_visibility")
+COUNTERFACTUAL_DATASETS = (
+    "counterfactual_ego_obs",
+    "counterfactual_ego_visibility",
+)
 
 
 def parse_args(argv=None):
@@ -104,6 +108,23 @@ def _init_augmentation(f: h5py.File, source: Path, gzip: int) -> int:
             compression="gzip",
             compression_opts=int(gzip),
         )
+        if "counterfactual_obs" in f:
+            f.create_dataset(
+                "counterfactual_ego_obs",
+                shape=(rows, OBS_CHANNELS, h, w),
+                dtype=np.uint8,
+                chunks=(chunk_rows, OBS_CHANNELS, h, w),
+                compression="gzip",
+                compression_opts=int(gzip),
+            )
+            f.create_dataset(
+                "counterfactual_ego_visibility",
+                shape=(rows, 1, h, w),
+                dtype=np.bool_,
+                chunks=(chunk_rows, 1, h, w),
+                compression="gzip",
+                compression_opts=int(gzip),
+            )
         f.create_dataset(
             "ego_visibility",
             shape=(rows, 1, h, w),
@@ -159,6 +180,14 @@ def augment(source: Path, output: Path, *, block_rows: int, gzip: int) -> None:
             ego_obs, visibility = project_ego_observation(obs, state, (h, w))
             f["ego_obs"][begin:end] = ego_obs
             f["ego_visibility"][begin:end] = visibility
+            if "counterfactual_obs" in f:
+                cf_obs = f["counterfactual_obs"][begin:end]
+                cf_state = f["counterfactual_next_state"][begin:end]
+                cf_ego, cf_visibility = project_ego_observation(
+                    cf_obs, cf_state, (h, w)
+                )
+                f["counterfactual_ego_obs"][begin:end] = cf_ego
+                f["counterfactual_ego_visibility"][begin:end] = cf_visibility
             f.attrs.modify("fog_rows_written", end)
             if end == rows or begin == start or (begin // block_rows) % 32 == 0:
                 f.flush()

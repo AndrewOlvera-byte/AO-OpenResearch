@@ -1,5 +1,5 @@
 run:
-  name: pretrain_causal_world_action_dynamics_v1
+  name: pretrain_causal_world_action_dynamics_v2
   seed: 0
   device: auto
 
@@ -29,13 +29,17 @@ data:
   h5_cache_mb: 256
 
 training:
-  # Produced by pretrain_world_action_encoder.py. Dynamics starts only after
-  # predictive-state promotion, not merely after reaching a checkpoint count.
-  belief_encoder_ckpt: checkpoints/pretrain_causal_world_action_encoder_v1/best.pt
+  # The 116k v3 checkpoint won the deterministic held-out conditioning eval:
+  # stronger counterfactual alignment and action-shuffle degradation than the
+  # 120k final checkpoint. Keep this path explicit so an older rolling/best
+  # checkpoint cannot be selected by a glob.
+  belief_encoder_ckpt: checkpoints/pretrain_causal_world_action_encoder_v3/best.pt
   source_intent_ckpt: checkpoints/pretrain_opponent_intent_prior_medium_v3/model.pt
   seq_len: 64
   steps: 120000
-  batch: 4
+  # The full multi-horizon + paired-counterfactual graph peaks above 16 GiB at
+  # batch 4. Batch 2 is the largest smoke-verified size on the RTX 5070 Ti.
+  batch: 2
   num_workers: 8
   prefetch_factor: 3
   persistent_workers: true
@@ -62,15 +66,19 @@ training:
       counterfactual_preference: 0.5
       reconstruction: 0.0
   val_frac: 0.05
+  eval_seed: 1729
   eval_every: 1000
   eval_batches: 16
   checkpoint_every: 2500
   log_every: 25
   monitor: world_action_dynamics/total
-  out: checkpoints/pretrain_causal_world_action_dynamics_v1/model.pt
+  # V1 artifacts were trained against the old v1 encoder; never overwrite or
+  # accidentally resume them with this incompatible frozen front end.
+  out: checkpoints/pretrain_causal_world_action_dynamics_v2/model.pt
 
 wandb:
   project: ao-openresearch
-  run_name: pretrain_causal_world_action_dynamics_v1
-  tags: [micro-rts, incomplete-info, causal-world-action-v1, factorized-flow,
-         intrinsic, extrinsic, interaction, reward-aware, bf16, flash-sdpa]
+  run_name: pretrain_causal_world_action_dynamics_v2
+  tags: [micro-rts, incomplete-info, causal-world-action-v1, encoder-v3-best-116k,
+         factorized-flow, intrinsic, extrinsic, interaction, counterfactual,
+         reward-aware, bf16, flash-sdpa]
