@@ -49,6 +49,8 @@ Output: ``/data/micro-rts/<name>__<UTC>__<git8>.h5``.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 import time
@@ -153,6 +155,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--name", required=True,
                    help="collection name; the file is <name>__<UTC>__<git8>.h5")
+    p.add_argument("--output", default=None,
+                   help="exact output .h5 path (fails if it already exists)")
+    p.add_argument("--split", choices=("train", "validation", "evaluation"),
+                   default=None, help="physical corpus split label")
+    p.add_argument("--episode-aware", action=argparse.BooleanOptionalAction,
+                   default=False, help="store only complete episodes as contiguous trajs")
     p.add_argument("--out-dir", default="/data/micro-rts",
                    help="output directory (default: /data/micro-rts)")
     p.add_argument("--maps", nargs="+",
@@ -206,6 +214,21 @@ def build_output_path(out_dir: str, name: str) -> Path:
     return out / f"{name}__{stamp}__{_git_sha()}.h5"
 
 
+def collection_manifest_hash(args, blocks) -> str:
+    payload = {
+        "split": args.split,
+        "seed": args.seed,
+        "maps": args.maps,
+        "bots": args.bots,
+        "num_envs": args.num_envs,
+        "max_episode_steps": args.max_episode_steps,
+        "counterfactual_frac": args.counterfactual_frac,
+        "blocks": [vars(block) for block in blocks],
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def main(argv=None) -> int:
     import numpy as np
     import torch
@@ -252,9 +275,15 @@ def main(argv=None) -> int:
         if b.mode == "bot" and b.seats == "mix":
             legend_id(b.policy_name() + "#p1seat")
 
-    out_path = build_output_path(args.out_dir, args.name)
+    out_path = Path(args.output) if args.output else build_output_path(args.out_dir, args.name)
+    if out_path.exists():
+        raise SystemExit(f"refusing to overwrite existing collection: {out_path}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_hash = collection_manifest_hash(args, blocks)
     print(f"[collect] writing -> {out_path}", flush=True)
     print(f"[collect] maps={args.maps} bots={args.bots} num_envs={n}", flush=True)
+    print(f"[collect] split={args.split or 'unspecified'} seed={args.seed} "
+          f"manifest_sha256={manifest_hash}", flush=True)
     for i, b in enumerate(blocks):
         print(f"[collect]   block {i}: {b.describe()} steps/lane={b.steps} "
               f"(={b.steps * n} transitions/map)", flush=True)
@@ -315,6 +344,10 @@ def main(argv=None) -> int:
                         state_shape=(base_env._grid_cells, 16),
                         store_counterfactual=args.counterfactual_frac > 0,
                         store_counterfactual_obs=args.counterfactual_frac > 0,
+                        episode_aware=args.episode_aware,
+                        split=args.split or "",
+                        collection_seed=args.seed,
+                        manifest_hash=manifest_hash,
                     )
                 elif cur != shapes:
                     raise SystemExit(
@@ -346,9 +379,18 @@ def main(argv=None) -> int:
                                         device=args.policy_device,
                                         steps_per_segment=args.steps_per_segment,
                                         selfplay_pairs=block.mode == "selfplay",
-                                        counterfactual_frac=args.counterfactual_frac)
+                                        counterfactual_frac=args.counterfactual_frac,
+                                        seed=args.seed + map_id * 100_003
+                                        + total_transitions)
+                if block.mode == "selfplay":
+                    lane_seat = np.arange(n, dtype=np.int8) % 2
+                elif block.seats == "mix":
+                    lane_seat = np.arange(n, dtype=np.int8) % 2
+                else:
+                    lane_seat = np.zeros(n, dtype=np.int8)
                 coll.collect(block.steps, map_id=map_id, opponent_id=lane_opp,
-                             policy_id=lane_pol, action_noise=block.eps)
+                             policy_id=lane_pol, action_noise=block.eps,
+                             seat=lane_seat)
                 total_transitions += block.steps * n
                 dt = time.time() - t0
                 print(f"[collect] map {map_id} block '{block.describe()}' done — "

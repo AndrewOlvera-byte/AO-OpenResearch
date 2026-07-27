@@ -233,11 +233,17 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         split_seed=0,
         h5_cache_mb=64,
         observation_mode="ego",
+        window_view="all",
+        uniform_windows_per_episode=8,
     ):
         import h5py
 
-        if split not in ("train", "val"):
-            raise ValueError(f"split must be 'train' or 'val', got {split!r}")
+        if split not in ("train", "val", "validation", "evaluation", "all"):
+            raise ValueError(f"invalid split label {split!r}")
+        if val_frac > 0.0 and split not in ("train", "val"):
+            raise ValueError("val_frac splitting only supports split='train' or 'val'")
+        if window_view not in ("all", "initial_prefix", "uniform", "completion"):
+            raise ValueError(f"invalid window_view {window_view!r}")
 
         if task not in _TASK_FIELDS:
             raise ValueError(
@@ -248,6 +254,8 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
         self.task = task
         self.stride = max(1, int(stride))
         self.observation_mode = str(observation_mode)
+        self.window_view = str(window_view)
+        self.uniform_windows_per_episode = max(1, int(uniform_windows_per_episode))
         self.incomplete_information = task.startswith("incomplete_")
         if self.observation_mode not in ("ego", "oracle_full"):
             raise ValueError(
@@ -382,12 +390,26 @@ class MRTSSequenceDataset(torch.utils.data.Dataset):
                 span_len = int(span_end - span_start)
                 if span_len < self.seq_len:
                     continue
-                offs = np.arange(
+                all_offs = np.arange(
                     0,
                     span_len - self.seq_len + 1,
                     self.stride,
                     dtype=np.int64,
                 )
+                if self.window_view == "initial_prefix":
+                    offs = all_offs[:1]
+                elif self.window_view == "completion":
+                    offs = all_offs[-1:]
+                elif self.window_view == "uniform":
+                    pick = np.linspace(
+                        0,
+                        len(all_offs) - 1,
+                        min(self.uniform_windows_per_episode, len(all_offs)),
+                        dtype=np.int64,
+                    )
+                    offs = all_offs[np.unique(pick)]
+                else:
+                    offs = all_offs
                 starts.append(int(span_start) + offs)
                 traj_of.append(np.full(len(offs), tj, dtype=np.int64))
         self._win_start = np.concatenate(starts) if starts else np.empty(0, np.int64)

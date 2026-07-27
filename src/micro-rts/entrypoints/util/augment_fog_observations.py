@@ -99,7 +99,7 @@ def _init_augmentation(f: h5py.File, source: Path, gzip: int) -> int:
         raise ValueError(f"partial fog schema present: {present}")
     if not present:
         obs_chunks = f["obs"].chunks or (min(256, rows), OBS_CHANNELS, h, w)
-        chunk_rows = int(obs_chunks[0])
+        chunk_rows = min(int(obs_chunks[0]), max(rows, 1))
         f.create_dataset(
             "ego_obs",
             shape=(rows, OBS_CHANNELS, h, w),
@@ -222,6 +222,10 @@ def audit(path: Path, *, block_rows: int) -> dict[str, int | float]:
         for name in NEW_DATASETS:
             if name not in f:
                 raise ValueError(f"missing augmented dataset {name!r}")
+        if "counterfactual_obs" in f:
+            for name in COUNTERFACTUAL_DATASETS:
+                if name not in f:
+                    raise ValueError(f"missing augmented dataset {name!r}")
         if not bool(f.attrs.get("has_ego_obs", False)):
             raise ValueError("has_ego_obs is not true")
         if not bool(f.attrs.get("fog_augmentation_complete", False)):
@@ -254,6 +258,22 @@ def audit(path: Path, *, block_rows: int) -> dict[str, int | float]:
                     f"ego_obs mismatch at row {begin + int(bad[0])}, "
                     f"channel/y/x={bad[1:].tolist()}"
                 )
+            if "counterfactual_obs" in f:
+                expected_cf_obs, expected_cf_vis = project_ego_observation(
+                    f["counterfactual_obs"][begin:end],
+                    f["counterfactual_next_state"][begin:end],
+                    (h, w),
+                )
+                actual_cf_obs = f["counterfactual_ego_obs"][begin:end]
+                actual_cf_vis = f["counterfactual_ego_visibility"][begin:end]
+                if not np.array_equal(actual_cf_vis, expected_cf_vis):
+                    raise AssertionError(
+                        f"counterfactual_ego_visibility mismatch in rows {begin}:{end}"
+                    )
+                if not np.array_equal(actual_cf_obs, expected_cf_obs):
+                    raise AssertionError(
+                        f"counterfactual_ego_obs mismatch in rows {begin}:{end}"
+                    )
 
             # Every categorical group remains exactly one-hot at every cell.
             offset = 0

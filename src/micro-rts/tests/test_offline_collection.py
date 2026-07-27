@@ -388,6 +388,54 @@ def test_is_first_marks_episode_starts(tmp_path):
         assert is_first.sum() == 2
 
 
+def test_episode_aware_writer_keeps_only_complete_contiguous_episodes(tmp_path):
+    """Episodes survive segment boundaries; unfinished tails never enter a split."""
+    import h5py
+
+    path = tmp_path / "episodes.h5"
+    env = DreamEnv(FakeVecEnv(num_envs=2, period=4))
+    writer = _writer(
+        path,
+        chunk_rows=8,
+        episode_aware=True,
+        split="train",
+        collection_seed=17,
+        manifest_hash="abc",
+    )
+    coll = OfflineCollector(
+        env,
+        MaskedRandomPolicy(torch.as_tensor(NVEC)),
+        writer,
+        steps_per_segment=3,
+        seed=17,
+    )
+    coll.collect(
+        10,
+        map_id=1,
+        opponent_id=np.array([0, 1]),
+        policy_id=0,
+        seat=np.array([0, 1]),
+    )
+    writer.close()
+
+    with h5py.File(path, "r") as f:
+        # Two full length-4 episodes per lane; the final 2 rows/lane are dropped.
+        assert f.attrs["num_episodes"] == 4
+        assert f.attrs["num_steps"] == 16
+        assert f.attrs["dropped_partial_rows"] == 4
+        starts = f["traj/start"][:]
+        lengths = f["traj/length"][:]
+        assert starts.tolist() == [0, 4, 8, 12]
+        assert lengths.tolist() == [4, 4, 4, 4]
+        assert len(np.unique(f["traj/episode_id"][:])) == 4
+        assert set(f["traj/seat"][:].tolist()) == {0, 1}
+        for start, length in zip(starts, lengths):
+            first = f["is_first"][start:start + length].astype(bool)
+            done = f["done"][start:start + length].astype(bool)
+            assert first.tolist() == [True, False, False, False]
+            assert done.tolist() == [False, False, False, True]
+
+
 def test_writer_surfaces_thread_errors(tmp_path):
     """A bad batch must fail loudly (not silently drop) on close/next add."""
     path = tmp_path / "d.h5"
@@ -458,6 +506,7 @@ def test_microrts_collect_smoke(tmp_path):
         store_terminal_obs=True,
         store_full_state=True, state_shape=(base._grid_cells, 16),
         store_counterfactual=True,
+        store_counterfactual_obs=True,
     )
     policy = MaskedRandomPolicy(base.action_nvec)
     coll = OfflineCollector(env, policy, writer, steps_per_segment=5,
@@ -483,6 +532,7 @@ def test_microrts_collect_smoke(tmp_path):
         assert f["state"].shape[1:] == (base._grid_cells, 16)
         assert f["counterfactual_valid"][:].any()
         assert (f["counterfactual_action"][:] != f["action"][:]).any()
+        assert f["counterfactual_obs"].shape[1:] == base.obs_shape
 
     with h5py.File(path, "r") as f:
         done = f["done"][:].astype(bool)

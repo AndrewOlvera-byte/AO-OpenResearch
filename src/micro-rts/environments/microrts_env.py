@@ -169,6 +169,13 @@ class MicroRTSVecEnv(VecEnv):
         out = torch.from_numpy(np.ascontiguousarray(obs)).permute(0, 3, 1, 2).float()
         return self._fix_seat1_owner_(out.contiguous())
 
+    def _encode_raw_observations(self, raw) -> torch.Tensor:
+        """Encode patched-client raw ``[N,5,H,W]`` observations to NCHW one-hot."""
+        encoded = np.stack(
+            [self._env._encode_obs(np.asarray(item)) for item in raw], axis=0
+        )
+        return self._encode(encoded)
+
     NUM_REWARD_COMPONENTS = 6  # (win, resource, worker, building, attack, combat-unit)
 
     def _raw_rewards(self, infos) -> torch.Tensor:
@@ -213,9 +220,9 @@ class MicroRTSVecEnv(VecEnv):
         for i in idx:
             raw = np.asarray(term[int(i)])  # (5, H, W) raw plane encoding
             enc = self._env._encode_obs(raw)  # (H, W, C) one-hot
-            out[int(i)] = (
-                torch.from_numpy(np.ascontiguousarray(enc)).permute(2, 0, 1).float()
-            )
+            out[int(i)] = torch.from_numpy(
+                np.ascontiguousarray(enc)
+            ).permute(2, 0, 1).float()
         return self._fix_seat1_owner_(out)
 
     def _structured_state(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -326,7 +333,7 @@ class MicroRTSVecEnv(VecEnv):
             self._env.vec_client.counterfactualFullGlobals, dtype=np.int32
         )
         return (
-            self._encode(obs.copy()),
+            self._encode_raw_observations(obs.copy()),
             torch.from_numpy(state.copy()),
             torch.from_numpy(glob.copy()),
         )

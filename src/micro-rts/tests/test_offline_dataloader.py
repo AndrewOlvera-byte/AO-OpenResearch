@@ -107,6 +107,27 @@ def test_stride_reduces_windows(tmp_path):
     dense.close(); strided.close()
 
 
+def test_fixed_episode_evaluation_views(tmp_path):
+    path = tmp_path / "d.h5"
+    _make_h5(path, num_lanes=2, seg_len=16, segments=1)
+    kw = dict(path=path, seq_len=4, task="tokenizer", split="evaluation")
+    initial = MRTSSequenceDataset(**kw, window_view="initial_prefix")
+    completion = MRTSSequenceDataset(**kw, window_view="completion")
+    uniform = MRTSSequenceDataset(
+        **kw, window_view="uniform", uniform_windows_per_episode=3
+    )
+    assert initial._win_start.tolist() == [0, 16]
+    assert completion._win_start.tolist() == [12, 28]
+    assert uniform._win_start.tolist() == [0, 6, 12, 16, 22, 28]
+    # Restarting reconstructs the identical immutable ordering.
+    uniform2 = MRTSSequenceDataset(
+        **kw, window_view="uniform", uniform_windows_per_episode=3
+    )
+    assert np.array_equal(uniform._win_start, uniform2._win_start)
+    for ds in (initial, completion, uniform, uniform2):
+        ds.close()
+
+
 # --- contiguity + no trajectory crossing ----------------------------------
 def test_windows_are_contiguous_and_never_cross_trajectories(tmp_path):
     path = tmp_path / "d.h5"

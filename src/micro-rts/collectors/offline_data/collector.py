@@ -40,6 +40,7 @@ class OfflineCollector:
         steps_per_segment=512,
         selfplay_pairs=False,
         counterfactual_frac=0.0,
+        seed=None,
     ):
         self.env, self.policy, self.writer = env, policy, writer
         self.device = device
@@ -55,7 +56,7 @@ class OfflineCollector:
             self._cf_policy = MaskedRandomPolicy(env.action_nvec, device=device)
         if self.selfplay_pairs:
             assert env.num_envs % 2 == 0, "selfplay_pairs needs paired lanes"
-        self._trans = env.reset()
+        self._trans = env.reset(seed=seed)
         if not self.selfplay_pairs and "opponent_action" not in self._trans.keys():
             raise RuntimeError(
                 "env does not surface opponent_action — format v3 collection needs "
@@ -65,7 +66,14 @@ class OfflineCollector:
 
     @torch.no_grad()
     def collect(
-        self, steps: int, *, map_id: int, opponent_id, policy_id=0, action_noise=0.0
+        self,
+        steps: int,
+        *,
+        map_id: int,
+        opponent_id,
+        policy_id=0,
+        action_noise=0.0,
+        seat=0,
     ) -> int:
         """Collect ``steps`` timesteps into the writer, tagged with map/opponent
         and the player-1 controller's provenance (``policy_id``/``action_noise``).
@@ -152,6 +160,7 @@ class OfflineCollector:
                     opponent_id=opponent_id,
                     policy_id=policy_id,
                     action_noise=action_noise,
+                    seat=seat,
                 )
                 done_in_seg = 0
         if done_in_seg > 0:
@@ -160,5 +169,7 @@ class OfflineCollector:
                 opponent_id=opponent_id,
                 policy_id=policy_id,
                 action_noise=action_noise,
+                seat=seat,
             )
+        self.writer.end_stream()
         return steps

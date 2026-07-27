@@ -119,6 +119,10 @@ class HDF5Writer:
         globals_shape=(8,),
         store_counterfactual=False,
         store_counterfactual_obs=False,
+        episode_aware=False,
+        split="",
+        collection_seed=0,
+        manifest_hash="",
     ):
         import h5py  # local import: only the writer process/thread needs it
 
@@ -135,6 +139,10 @@ class HDF5Writer:
         self.globals_shape = tuple(int(x) for x in globals_shape)
         self.store_counterfactual = bool(store_counterfactual)
         self.store_counterfactual_obs = bool(store_counterfactual_obs)
+        self.episode_aware = bool(episode_aware)
+        self.split = str(split)
+        self.collection_seed = int(collection_seed)
+        self.manifest_hash = str(manifest_hash)
         if self.store_counterfactual_obs and not self.store_counterfactual:
             raise ValueError("counterfactual observations require counterfactual storage")
         if self.store_full_state and self.state_shape is None:
@@ -212,6 +220,10 @@ class HDF5Writer:
             policies=list(policies),
             git_sha=git_sha,
             config_json=json.dumps(config or {}, sort_keys=True),
+            episode_aware=self.episode_aware,
+            split=self.split,
+            collection_seed=self.collection_seed,
+            manifest_hash=self.manifest_hash,
         )
 
         self._q: queue.Queue = queue.Queue(maxsize=queue_size)
@@ -219,6 +231,9 @@ class HDF5Writer:
         # Counters owned by the writer thread.
         self._rows = 0
         self._ntraj = 0
+        self._dropped_partial_rows = 0
+        self._episode_serial = 0
+        self._episode_buffers: list[list[dict[str, np.ndarray]]] | None = None
         # Segment accumulation (writer thread only): list of per-step batches.
         self._seg: list[dict[str, np.ndarray]] = []
         self._thread = threading.Thread(
@@ -244,7 +259,7 @@ class HDF5Writer:
         self._q.put(("batch", np_batch))
 
     def end_segment(
-        self, *, map_id: int, opponent_id, policy_id=0, action_noise=0.0
+        self, *, map_id: int, opponent_id, policy_id=0, action_noise=0.0, seat=0
     ) -> None:
         """Flush the buffered steps as a lane-major set of trajectories.
 
@@ -259,7 +274,13 @@ class HDF5Writer:
         opp = np.asarray(opponent_id, dtype=np.int32)
         pol = np.asarray(policy_id, dtype=np.int32)
         eps = np.asarray(action_noise, dtype=np.float32)
-        self._q.put(("end_segment", (int(map_id), opp, pol, eps)))
+        seats = np.asarray(seat, dtype=np.int8)
+        self._q.put(("end_segment", (int(map_id), opp, pol, eps, seats)))
+
+    def end_stream(self) -> None:
+        """Finish one env/policy stream, dropping only non-terminal episode tails."""
+        self._raise_if_failed()
+        self._q.put(("end_stream", None))
 
     def close(self) -> None:
         """Flush the last segment, finalize metadata, join the writer thread."""
@@ -288,6 +309,8 @@ class HDF5Writer:
                         self._seg.append(payload)
                     elif kind == "end_segment":
                         self._write_segment(f, *payload)
+                    elif kind == "end_stream":
+                        self._drop_partial_episodes()
                     elif kind == "close":
                         if self._seg:
                             # Untagged trailing steps (defensive; collector always
@@ -299,7 +322,9 @@ class HDF5Writer:
                                 np.full(n, -1, np.int32),
                                 np.full(n, -1, np.int32),
                                 np.zeros(n, np.float32),
+                                np.zeros(n, np.int8),
                             )
+                        self._drop_partial_episodes()
                         self._finalize(f)
                         return
         except BaseException as exc:  # surface to the producer
@@ -346,13 +371,17 @@ class HDF5Writer:
             ("opponent_id", np.int32),
             ("policy_id", np.int32),
             ("action_noise", np.float32),
+            ("episode_id", np.int64),
+            ("collection_seed", np.int64),
+            ("seat", np.int8),
+            ("terminal_outcome", np.int8),
         ):
             g.create_dataset(name, shape=(0,), maxshape=(None,), dtype=dt)
         for k, v in self._meta.items():
             f.attrs[k] = v
 
     def _write_segment(
-        self, f, map_id: int, opponent_id, policy_id, action_noise
+        self, f, map_id: int, opponent_id, policy_id, action_noise, seat
     ) -> None:
         if not self._seg:
             return
@@ -363,6 +392,11 @@ class HDF5Writer:
         opp = np.broadcast_to(np.asarray(opponent_id, np.int32), (N,)).copy()
         pol = np.broadcast_to(np.asarray(policy_id, np.int32), (N,)).copy()
         eps = np.broadcast_to(np.asarray(action_noise, np.float32), (N,)).copy()
+        seats = np.broadcast_to(np.asarray(seat, np.int8), (N,)).copy()
+
+        if self.episode_aware:
+            self._write_episode_segment(f, steps, map_id, opp, pol, eps, seats)
+            return
 
         for name in self._fields:
             # (T, N, *tail) -> (N, T, *tail) -> (N*T, *tail): lane-major so each
@@ -385,12 +419,27 @@ class HDF5Writer:
             opp,
             pol,
             eps,
+            np.arange(self._ntraj, self._ntraj + N, dtype=np.int64),
+            np.full(N, self.collection_seed, np.int64),
+            seats,
+            np.zeros(N, np.int8),
         )
         self._rows += N * T
         self._ntraj += N
 
     def _append_traj(
-        self, f, start, length, map_id, opponent_id, policy_id, action_noise
+        self,
+        f,
+        start,
+        length,
+        map_id,
+        opponent_id,
+        policy_id,
+        action_noise,
+        episode_id,
+        collection_seed,
+        seat,
+        terminal_outcome,
     ) -> None:
         g = f["traj"]
         k = g["start"].shape[0]
@@ -402,10 +451,96 @@ class HDF5Writer:
             ("opponent_id", opponent_id),
             ("policy_id", policy_id),
             ("action_noise", action_noise),
+            ("episode_id", episode_id),
+            ("collection_seed", collection_seed),
+            ("seat", seat),
+            ("terminal_outcome", terminal_outcome),
         ):
             g[name].resize(k + n, axis=0)
             g[name][k:] = val
 
+    def _write_episode_segment(
+        self, f, steps, map_id, opponent_id, policy_id, action_noise, seat
+    ) -> None:
+        """Accumulate lane streams and append only complete episodes contiguously."""
+        T = len(steps)
+        N = steps[0]["reward"].shape[0]
+        if self._episode_buffers is None:
+            self._episode_buffers = [[] for _ in range(N)]
+        elif len(self._episode_buffers) != N:
+            raise ValueError("num_envs changed before end_stream()")
+
+        for lane in range(N):
+            buf = self._episode_buffers[lane]
+            for t in range(T):
+                row = {name: steps[t][name][lane] for name in self._fields}
+                if not buf and not bool(row["is_first"]):
+                    # A stream must start at reset. Ignore a defensive partial
+                    # prefix rather than admitting an incomplete episode.
+                    self._dropped_partial_rows += 1
+                    continue
+                buf.append(row)
+                if bool(row["done"]):
+                    self._append_complete_episode(
+                        f,
+                        buf,
+                        map_id=map_id,
+                        opponent_id=int(opponent_id[lane]),
+                        policy_id=int(policy_id[lane]),
+                        action_noise=float(action_noise[lane]),
+                        seat=int(seat[lane]),
+                    )
+                    self._episode_buffers[lane] = []
+                    buf = self._episode_buffers[lane]
+
+    def _append_complete_episode(
+        self,
+        f,
+        rows,
+        *,
+        map_id,
+        opponent_id,
+        policy_id,
+        action_noise,
+        seat,
+    ) -> None:
+        if not rows or not bool(rows[0]["is_first"]) or not bool(rows[-1]["done"]):
+            raise ValueError("attempted to append an incomplete episode")
+        length = len(rows)
+        start = self._rows
+        for name in self._fields:
+            values = np.stack([row[name] for row in rows], axis=0)
+            ds = f[name]
+            ds.resize(start + length, axis=0)
+            ds[start:] = values
+
+        episode_id = (self.collection_seed << 32) | self._episode_serial
+        outcome = int(np.sign(float(rows[-1]["raw_rewards"][0])))
+        self._append_traj(
+            f,
+            np.asarray([start], np.int64),
+            np.asarray([length], np.int64),
+            np.asarray([map_id], np.int32),
+            np.asarray([opponent_id], np.int32),
+            np.asarray([policy_id], np.int32),
+            np.asarray([action_noise], np.float32),
+            np.asarray([episode_id], np.int64),
+            np.asarray([self.collection_seed], np.int64),
+            np.asarray([seat], np.int8),
+            np.asarray([outcome], np.int8),
+        )
+        self._rows += length
+        self._ntraj += 1
+        self._episode_serial += 1
+
+    def _drop_partial_episodes(self) -> None:
+        if self._episode_buffers is None:
+            return
+        self._dropped_partial_rows += sum(len(rows) for rows in self._episode_buffers)
+        self._episode_buffers = None
+
     def _finalize(self, f) -> None:
         f.attrs["num_steps"] = int(self._rows)
         f.attrs["num_trajectories"] = int(self._ntraj)
+        f.attrs["num_episodes"] = int(self._ntraj if self.episode_aware else 0)
+        f.attrs["dropped_partial_rows"] = int(self._dropped_partial_rows)

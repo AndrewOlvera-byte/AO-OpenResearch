@@ -214,6 +214,8 @@ def build_mrts_loader(
     paired_batch_fraction=None,
     h5_cache_mb=64,
     observation_mode="ego",
+    window_view="all",
+    uniform_windows_per_episode=8,
 ):
     """Build a ``DataLoader`` of ``[B, T, ...]`` window batches for ``task``.
 
@@ -238,6 +240,8 @@ def build_mrts_loader(
         split_seed=split_seed,
         h5_cache_mb=h5_cache_mb,
         observation_mode=observation_mode,
+        window_view=window_view,
+        uniform_windows_per_episode=uniform_windows_per_episode,
     )
     if len(ds) == 0:
         raise ValueError(
